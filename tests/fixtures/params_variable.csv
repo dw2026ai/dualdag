@@ -1,0 +1,4 @@
+Dataset,Variable,Label,Type,Length,Key,Source,Derivation
+ADVS,USUBJID,Subject,Char,10,1,DM.USUBJID,
+ADVS,PARAMCD,Parameter Code,Char,8,2,,
+ADVS,AVAL,Analysis Value,Num,8,,,

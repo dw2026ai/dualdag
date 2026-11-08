@@ -1,0 +1,121 @@
+{
+  "edges": [
+    {
+      "from": "SYSBP",
+      "to": "AVAL",
+      "evidence": "For a collected parameter, copy VS.VSSTRESN from the VS row whose VS.VSTESTCD equals ADVS.PARAMCD. Keep the row when VS.VSSTRESN is missing.",
+      "uses": [
+        {
+          "from_var": "VS.VSSTRESN",
+          "to_var": "AVAL"
+        },
+        {
+          "from_var": "VS.VSTESTCD",
+          "to_var": "AVAL"
+        }
+      ]
+    },
+    {
+      "from": "WEIGHT",
+      "to": "BMI",
+      "evidence": "Derived parameter. Create one row for each WEIGHT record whose numeric result is not missing. Pair it with the HEIGHT record for the same ADVS.USUBJID and the same ADVS.AVISITN when that HEIGHT record exists. Otherwise pair it with the HEIGHT record for the same ADVS.USUBJID whose ADVS.ADT is the latest ADVS.ADT on or before the WEIGHT record ADVS.ADT. Break a tie on the height record with the greatest source sequence. The numeric result is the WEIGHT result in kilograms divided by the square of the HEIGHT result in metres. Convert centimetres to metres by dividing by 100. Skip the row when the height result is missing or not greater than zero.",
+      "uses": [
+        {
+          "from_var": "ADVS.PARAMCD",
+          "to_var": "ADVS.PARAMCD"
+        },
+        {
+          "from_var": "ADVS.AVAL",
+          "to_var": "ADVS.AVAL"
+        },
+        {
+          "from_var": "ADVS.USUBJID",
+          "to_var": "ADVS.USUBJID"
+        },
+        {
+          "from_var": "ADVS.AVISITN",
+          "to_var": "ADVS.AVISITN"
+        },
+        {
+          "from_var": "ADVS.ADT",
+          "to_var": "ADVS.ADT"
+        },
+        {
+          "from_var": "ADVS.SRCSEQ",
+          "to_var": "ADVS.SRCSEQ"
+        }
+      ]
+    },
+    {
+      "from": "WTLS15DT",
+      "to": "ABLFL",
+      "evidence": "Set ABLFL to N for WTLS15DT.",
+      "uses": [
+        {
+          "from_var": "ADVS.AVAL",
+          "to_var": "ABLFL"
+        },
+        {
+          "from_var": "ADVS.ADT",
+          "to_var": "ABLFL"
+        },
+        {
+          "from_var": "ADVS.AVISITN",
+          "to_var": "ABLFL"
+        },
+        {
+          "from_var": "ADVS.SRCSEQ",
+          "to_var": "ABLFL"
+        },
+        {
+          "from_var": "ADVS.USUBJID",
+          "to_var": "ABLFL"
+        },
+        {
+          "from_var": "ADVS.PARAMCD",
+          "to_var": "ABLFL"
+        },
+        {
+          "from_var": "ADVS.ATPTN",
+          "to_var": "ABLFL"
+        },
+        {
+          "from_var": "ADSL.TRTSDT",
+          "to_var": "ABLFL"
+        }
+      ]
+    },
+    {
+      "from": "WEIGHT",
+      "to": "WTLS15DT",
+      "evidence": "Derived parameter. For each subject, consider WEIGHT rows with non-missing ADVS.AVAL and the baseline value on that WEIGHT row and ADVS.ADT after ADSL.TRTSDT. A row with missing ADVS.AVAL is not a candidate and does not break a sequence. Order candidate rows by ADVS.ADT, then ADVS.AVISITN, then ADVS.SRCSEQ. A candidate qualifies when ADVS.AVAL is less than 0.85 times the baseline value on that WEIGHT row. Find the first pair of consecutive candidate measurements that both qualify. Create at most one WTLS15DT row per subject, only when that pair exists. The event date is ADVS.ADT from the first measurement of the pair. Set AVAL to that date as a numeric SAS date, in days since 1960-01-01.",
+      "uses": [
+        {
+          "from_var": "ADVS.PARAMCD",
+          "to_var": "ADVS.PARAMCD"
+        },
+        {
+          "from_var": "ADVS.AVAL",
+          "to_var": "ADVS.AVAL"
+        },
+        {
+          "from_var": "ADVS.ADT",
+          "to_var": "ADVS.ADT"
+        },
+        {
+          "from_var": "ADVS.AVISITN",
+          "to_var": "ADVS.AVISITN"
+        },
+        {
+          "from_var": "ADVS.SRCSEQ",
+          "to_var": "ADVS.SRCSEQ"
+        },
+        {
+          "from_var": "ADSL.TRTSDT",
+          "to_var": "ADVS.ADT"
+        }
+      ]
+    }
+  ],
+  "undefined": []
+}

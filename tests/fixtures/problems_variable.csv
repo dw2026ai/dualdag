@@ -1,0 +1,9 @@
+Dataset,Variable,Label,Type,Length,Key,Source,Derivation
+CYC,A,Var A,Char,8,,,B
+CYC,B,Var B,Char,8,,,A
+CYC,C,Var C,Char,8,,,CYC.NOTREAL
+BAD,CHG,Change,Num,8,,,AVAL - BASE
+BAD,BASE,Baseline,Num,8,,,
+BAD,AVAL,Analysis Value,Num,8,,,
+OTH,AVAL,Analysis Value,Num,8,,,
+PROSE,NOTE,Note,Char,20,,,recorded from the site narrative

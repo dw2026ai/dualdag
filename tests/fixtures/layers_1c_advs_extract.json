@@ -1,0 +1,51 @@
+{
+  "edges": [
+    {
+      "from": "BASE",
+      "to": "CHG",
+      "evidence": "When ADVS.AVAL and ADVS.BASE are both non-missing, set CHG to ADVS.AVAL minus ADVS.BASE.",
+      "params": []
+    }
+  ],
+  "external": [
+    {
+      "ref": "VS",
+      "domain": "VS",
+      "var": "STUDYID",
+      "used_by": [
+        "STUDYID"
+      ],
+      "evidence": "Copy VS.STUDYID.",
+      "params": []
+    },
+    {
+      "ref": "VS",
+      "domain": "VS",
+      "var": "USUBJID",
+      "used_by": [
+        "USUBJID"
+      ],
+      "evidence": "Copy VS.USUBJID.",
+      "params": []
+    },
+    {
+      "ref": "VS",
+      "domain": "VS",
+      "var": "VSSTRESN",
+      "used_by": [
+        "AVAL"
+      ],
+      "evidence": "For a collected parameter, copy VS.VSSTRESN from the VS row whose VS.VSTESTCD equals ADVS.PARAMCD.",
+      "params": [
+        "SYSBP",
+        "DIABP",
+        "PULSE",
+        "TEMP",
+        "WEIGHT",
+        "HEIGHT"
+      ]
+    }
+  ],
+  "unresolved": [],
+  "categories": []
+}

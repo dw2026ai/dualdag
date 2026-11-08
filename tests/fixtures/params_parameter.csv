@@ -1,0 +1,4 @@
+Dataset,PARAMCD,PARAM,Source,Derivation
+ADVS,WEIGHT,Weight,VS.VSSTRESN,
+ADVS,HEIGHT,Height,VS.VSSTRESN,
+ADVS,BMI,Body Mass Index,,WEIGHT and HEIGHT

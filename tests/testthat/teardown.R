@@ -1,0 +1,5 @@
+original <- Sys.getenv("DUALDAG_TEST_ORIGINAL_HOME", unset = "__UNSET__")
+test_home <- Sys.getenv("DUALDAG_TEST_HOME", unset = "")
+if (identical(original, "__UNSET__")) Sys.unsetenv("DUALDAG_HOME") else Sys.setenv(DUALDAG_HOME = original)
+Sys.unsetenv(c("DUALDAG_TEST_HOME", "DUALDAG_TEST_ORIGINAL_HOME"))
+if (nzchar(test_home) && dir.exists(test_home)) unlink(test_home, recursive = TRUE)

@@ -1,0 +1,4 @@
+# Left out of `git archive` and of GitHub's source zips.
+tests/ export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore

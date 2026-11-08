@@ -1,0 +1,100 @@
+app_root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
+for (f in c("utils.R", "deps.R", "config.R", "llm.R", "spec.R", "project.R",
+            "catalog.R", "sides.R", "param_graph.R", "coder_window.R", "viewer.R", "inspect.R", "server.R"))
+  sys.source(file.path(app_root, "R", f), envir = globalenv())
+source(file.path(testthat::test_path(), "..", "fixtures", "helper.R"))
+
+start_new_call <- function(A, body) {
+  raw <- charToRaw(as.character(to_json(body)))
+  req <- list(PATH_INFO = "/api/project/start-new", REQUEST_METHOD = "POST", QUERY_STRING = "",
+              HTTP_HOST = sprintf("127.0.0.1:%d", A$port), HTTP_X_DUALDAG_TOKEN = A$token,
+              CONTENT_TYPE = "application/json", rook.input = list(read = function() raw))
+  make_handlers(A)$call(req)
+}
+
+test_that("Start New DAG refuses invalid confirmation, active work, and missing key", {
+  old <- Sys.getenv(c("DUALDAG_HOME", "DUALDAG_LLM_API_KEY", "DUALDAG_FAKE_LLM"))
+  home <- tempfile("start-new-home-"); dir.create(home)
+  Sys.setenv(DUALDAG_HOME = home, DUALDAG_LLM_API_KEY = "", DUALDAG_FAKE_LLM = "")
+  on.exit({
+    for (nm in names(old)) if (nzchar(old[[nm]])) do.call(Sys.setenv, setNames(list(old[[nm]]), nm)) else Sys.unsetenv(nm)
+  }, add = TRUE)
+  proj <- tempfile("start-new-project-"); dir.create(proj)
+  A <- create_app(app_root, proj, 7991L, "start-new-token", load_config())
+  sentinel <- file.path(proj, ".dualdag", "keep.txt"); writeLines("keep", sentinel)
+  for (body in list(list(), list(confirm = "confirm"), list(confirm = "CONFIRM "))) {
+    expect_equal(start_new_call(A, body)$status, 400L)
+    expect_true(file.exists(sentinel))
+  }
+  expect_equal(start_new_call(A, list(confirm = "CONFIRM"))$status, 400L)
+  expect_true(file.exists(sentinel))
+  Sys.setenv(DUALDAG_LLM_API_KEY = "test-key")
+  A$jobs <- list(job = list(kind = "generate"))
+  expect_equal(start_new_call(A, list(confirm = "CONFIRM"))$status, 409L)
+  expect_true(file.exists(sentinel))
+  A$jobs <- list()
+  A$batch <- list(finished = FALSE)
+  expect_equal(start_new_call(A, list(confirm = "CONFIRM"))$status, 409L)
+  expect_true(file.exists(sentinel))
+})
+
+test_that("Start New DAG wipes work, preserves inputs, resets live state, and refuses outside symlinks", {
+  old <- Sys.getenv(c("DUALDAG_HOME", "DUALDAG_LLM_API_KEY", "DUALDAG_FAKE_LLM"))
+  home <- tempfile("start-new-home-"); dir.create(home)
+  Sys.setenv(DUALDAG_HOME = home, DUALDAG_LLM_API_KEY = "test-key", DUALDAG_FAKE_LLM = "1")
+  on.exit({
+    for (nm in names(old)) if (nzchar(old[[nm]])) do.call(Sys.setenv, setNames(list(old[[nm]]), nm)) else Sys.unsetenv(nm)
+  }, add = TRUE)
+  proj <- tempfile("start-new-project-"); dir.create(proj)
+  dir.create(file.path(proj, "spec")); dir.create(file.path(proj, "data"))
+  writeBin(charToRaw("spec bytes\r\n"), file.path(proj, "spec", "variable.csv"))
+  writeBin(charToRaw("data bytes\n"), file.path(proj, "data", "ADSL.xpt"))
+  A <- create_app(app_root, proj, 7992L, "start-new-token", load_config())
+  dir.create(file.path(proj, ".dualdag", "state"), showWarnings = FALSE)
+  writeLines("graph", file.path(proj, ".dualdag", "state", "graph_ADSL.json"))
+  dir.create(file.path(proj, ".dualdag", "sessions"), showWarnings = FALSE)
+  writeLines("session", file.path(proj, ".dualdag", "sessions", "session.json"))
+  writeLines("export", file.path(proj, "output", "ADSL.xpt"))
+  external <- tempfile("outside-"); dir.create(external); writeLines("safe", file.path(external, "sentinel"))
+  link <- file.path(proj, ".dualdag", "outside-link")
+  expect_true(file.symlink(external, link))
+  refused <- start_new_call(A, list(confirm = "CONFIRM"))
+  expect_equal(refused$status, 400L)
+  expect_true(file.exists(file.path(external, "sentinel")))
+  unlink(link)
+  before_spec <- readBin(file.path(proj, "spec", "variable.csv"), "raw", n = 100)
+  before_data <- readBin(file.path(proj, "data", "ADSL.xpt"), "raw", n = 100)
+  expect_equal(start_new_call(A, list(confirm = "CONFIRM"))$status, 200L)
+  expect_identical(readBin(file.path(proj, "spec", "variable.csv"), "raw", n = 100), before_spec)
+  expect_identical(readBin(file.path(proj, "data", "ADSL.xpt"), "raw", n = 100), before_data)
+  expect_length(list.files(file.path(proj, ".dualdag", "state"), all.files = TRUE, no.. = TRUE), 1L) # fresh state.json
+  expect_length(list.files(file.path(proj, ".dualdag", "runs"), all.files = TRUE, no.. = TRUE), 0L)
+  expect_length(list.files(file.path(proj, ".dualdag", "sessions"), all.files = TRUE, no.. = TRUE), 0L)
+  expect_length(list.files(file.path(proj, "output"), all.files = TRUE, no.. = TRUE), 0L)
+  expect_null(load_graph(A$project, "ADSL"))
+  expect_equal(length(A$project$state$nodes), 0L)
+  expect_equal(start_new_call(A, list(confirm = "CONFIRM"))$status, 200L)
+  expect_true(file.exists(file.path(external, "sentinel")))
+})
+
+test_that("Start New DAG uses LLM readiness for fake mode and real providers", {
+  old <- Sys.getenv(c("DUALDAG_HOME", "DUALDAG_LLM_API_KEY", "DUALDAG_FAKE_LLM"))
+  home <- tempfile("start-new-readiness-"); dir.create(home)
+  Sys.setenv(DUALDAG_HOME = home, DUALDAG_LLM_API_KEY = "", DUALDAG_FAKE_LLM = "1")
+  on.exit({
+    for (nm in names(old)) if (nzchar(old[[nm]])) do.call(Sys.setenv, setNames(list(old[[nm]]), nm)) else Sys.unsetenv(nm)
+  }, add = TRUE)
+  fake_project <- tempfile("start-new-fake-"); dir.create(fake_project)
+  fake_app <- create_app(app_root, fake_project, 7993L, "start-new-fake", load_config())
+  expect_equal(start_new_call(fake_app, list(confirm = "CONFIRM"))$status, 200L)
+
+  Sys.setenv(DUALDAG_FAKE_LLM = "")
+  real_project <- tempfile("start-new-real-"); dir.create(real_project)
+  writeLines("must survive", file.path(open_project(real_project)$state_dir, "sentinel"))
+  real_cfg <- modifyList(load_config(), list(provider = "openai"))
+  real_app <- create_app(app_root, real_project, 7994L, "start-new-real", real_cfg)
+  refused <- start_new_call(real_app, list(confirm = "CONFIRM"))
+  expect_equal(refused$status, 400L)
+  expect_match(from_json(refused$body)$error, "Choose a model in Settings")
+  expect_true(file.exists(file.path(real_project, ".dualdag", "state", "sentinel")))
+})

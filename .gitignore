@@ -1,0 +1,9 @@
+.dualdag/
+output/
+*.Rproj.user
+.Rhistory
+.orca-tasks/
+demos/*/data/
+demos/*/.dualdag/
+demos/*/output/
+demos/*/programs/

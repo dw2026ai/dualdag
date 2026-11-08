@@ -1,0 +1,16 @@
+Package: dualdag
+Type: Application
+Title: Local Web App to Build an SDTM to ADaM Dependency Graph and Dual Programs
+Version: 0.1.0.9000
+Authors@R: person("Wei", "Ding", email = "wayne.ding26@gmail.com", role = c("aut", "cre"))
+Description: Runs a local web page (served by R itself with httpuv) that reads an
+    ADaM variable spec, asks an LLM for the dependency graph, and generates two
+    independent programs per variable. Not an installable package: start it with
+    source("run.R") or Rscript run.R.
+License: MIT + file LICENSE
+Depends: R (>= 4.2.0)
+Imports: httpuv (>= 1.6.0), jsonlite (>= 1.8.0), httr2 (>= 1.0.0), callr (>= 3.7.0), processx (>= 3.8.0),
+    later (>= 1.3.0), promises (>= 1.2.0), openssl (>= 1.4.0), haven (>= 2.5.0),
+    igraph (>= 1.3.0), diffdf (>= 1.0.0), dplyr (>= 1.1.0)
+Suggests: testthat (>= 3.0.0)
+Encoding: UTF-8

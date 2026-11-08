@@ -1,0 +1,6 @@
+Dataset,Variable,Label,Type,Length,Key,Source,Derivation
+CLN,ROOT,Root,Char,8,,,
+CLN,A,Child A,Char,8,,,ROOT
+CLN,B,Child B,Char,8,,,ROOT
+CLN,A1,Grandchild A,Char,8,,,A
+CLN,B1,Grandchild B,Char,8,,,B
