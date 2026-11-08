@@ -4,33 +4,30 @@ Hard constraint: user has only R (>= 4.2) + a browser. No Node/Python/build tool
 Frontend = hand-written static `www/index.html`, `www/app.js`, `www/style.css` (no frameworks, no CDN).
 DAG layout/drawing is done in plain JS + SVG. Graph algorithms in R with **igraph**; comparison with **diffdf**.
 
-Test R on this dev machine: `~/.local/mamba/root/envs/r/bin/Rscript` (packages httpuv jsonlite httr2
-callr later promises openssl haven igraph diffdf dplyr testthat already installed).
-
-## File layout & ownership
+## File layout
 
 ```
-run.R                 launcher (Worker A)
-DESCRIPTION, README.md, README_zh.md, LICENSE (MIT)   (Worker A)
-R/utils.R             %||%, to_json, from_json, read_text, write_text, now_iso, random_token, safe_path (A)
-R/deps.R              dualdag_required_packages(), dualdag_ensure_deps() (A)
-R/config.R            ~/.dualdag/config.json, ~/.dualdag/api_key (600), env DUALDAG_LLM_API_KEY (A)
-R/server.R            httpuv server, token/Host/Origin checks, CSP, static, API routing, bg_promise (A)
-R/project.R           project folder, uploads, persistence (.dualdag/state/), external-change detection (A)
-R/spec.R              read/validate variable.csv + parameter.csv, templates (A)
-R/llm.R               provider adapters (openai / anthropic / openai_compatible / grok_cli / claude_cli / codex_cli), parse_json_reply (B)
-R/deps_extract.R      LLM dependency extraction (F5) (B)
-R/dag.R               igraph build, checks (F6, F7), topo order, node status machine (F9a-c, F9i) (B)
+run.R                 launcher
+DESCRIPTION, README.md, README_zh.md, LICENSE (MIT)
+R/utils.R             %||%, to_json, from_json, read_text, write_text, now_iso, random_token, safe_path
+R/deps.R              dualdag_required_packages(), dualdag_ensure_deps()
+R/config.R            ~/.dualdag/config.json, ~/.dualdag/api_key (600), env DUALDAG_LLM_API_KEY
+R/server.R            httpuv server, token/Host/Origin checks, CSP, static, API routing, bg_promise
+R/project.R           project folder, uploads, persistence (.dualdag/state/), external-change detection
+R/spec.R              read/validate variable.csv + parameter.csv, templates
+R/llm.R               provider adapters (openai / anthropic / openai_compatible / grok_cli / claude_cli / codex_cli), parse_json_reply
+R/deps_extract.R      LLM dependency extraction (F5)
+R/dag.R               igraph build, checks (F6, F7), topo order, node status machine (F9a-c, F9i)
 R/dag_agent.R         readable dag_<DS>.md, on-demand node lookup, DAG agent ask/apply
-R/sides.R             primary/validation code generation prompts + isolated callr runs (F9e, F9f) (B)
+R/sides.R             primary/validation code generation prompts + isolated callr runs (F9e, F9f)
 R/cards.R             per-side variable cards: computed facts, descriptions, parent hashes, warnings, edits, backfill
-R/compare.R           diffdf per-variable compare by Key, mismatch QC report (F9b③, F9g) (B)
+R/compare.R           diffdf per-variable compare by Key, mismatch QC report (F9b③, F9g)
 R/inspect.R           whole-dataset code assembly and local mismatch-input table (no LLM)
-R/qc.R                ~/.dualdag/qc/<DATASET>.md store (F9g) (B)
-R/export.R            export dataset xpt/rds with labels/types/lengths (F11) (B)
-www/index.html, www/app.js, www/style.css   (Worker C)
+R/qc.R                ~/.dualdag/qc/<DATASET>.md store (F9g)
+R/export.R            export dataset xpt/rds with labels/types/lengths (F11)
+www/index.html, www/app.js, www/style.css
 templates/variable.csv, templates/parameter.csv, templates/qc-methodology.md
-tests/testthat/*.R    each worker writes tests for its own files
+tests/testthat/*.R
 ```
 
 Layered dependency graphs apply when a dataset has parameter.csv rows. They carry `layered: true`, one
@@ -408,7 +405,7 @@ An old link `tab=data&diff=1` or `tab=data&view=diff` opens Mismatches.
 6. **Settings** — Spec upload and templates, analysis dataset formats, the input xpt list and its variable catalog,
    and model settings (the old header button). The four cards sit two-by-two on a wide screen and stack on phones.
 
-Data viewer API (Worker A):
+Data viewer API:
 - `GET /api/datasets` -> `[{id, kind:"input"|"result"|"assembled"|"output", dataset, node?, side?, file, nrow, ncol, updated}]`
   (`id` is an opaque string usable in the next call).
 - `GET /api/datasets/view?id=&offset=0&limit=100&filter=&cols=` -> `{id, nrow, ncol, columns:[{name,label,type}],
