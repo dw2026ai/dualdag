@@ -9,6 +9,83 @@ review_progress_path <- function(project, dataset, node, side) {
   file.path(side_run_dir(project_dir_of(project), dataset, node, side), ".reviewing")
 }
 
+node_progress_path <- function(project, dataset, node, side) {
+  root <- if (is.character(project)) project else project_dir_of(project)
+  file.path(side_run_dir(root, dataset, node, side), ".progress.json")
+}
+
+progress_read <- function(project, dataset, node, side) {
+  p <- node_progress_path(project, dataset, node, side)
+  if (!file.exists(p)) return(NULL)
+  tryCatch(read_json(p), error = function(e) NULL)
+}
+
+progress_write <- function(project, dataset, node, side, record) {
+  p <- node_progress_path(project, dataset, node, side)
+  dir.create(dirname(p), recursive = TRUE, showWarnings = FALSE)
+  tmp <- tempfile(".progress-", dirname(p))
+  on.exit(unlink(tmp), add = TRUE)
+  write_json(record, tmp)
+  if (!file.rename(tmp, p)) stop("Could not atomically write progress record.", call. = FALSE)
+  invisible(record)
+}
+
+progress_set_step <- function(project, dataset, node, side, step, inputs = NULL) {
+  old <- progress_read(project, dataset, node, side)
+  if (!is.null(old$done) && isTRUE(old$done) && !identical(as.character(step)[1], "compare")) old <- NULL
+  now <- now_iso()
+  if (is.null(old)) old <- list(events = list(), inputs = inputs %||% list())
+  if (!is.null(old$step) && !is.null(old$step_started_at)) {
+    started <- suppressWarnings(as.POSIXct(old$step_started_at, tz = "UTC"))
+    current <- suppressWarnings(as.POSIXct(now, tz = "UTC"))
+    if (is.finite(as.numeric(started)) && is.finite(as.numeric(current))) {
+      timings <- old$step_timings %||% list()
+      key <- as.character(old$step)[1]
+      timings[[key]] <- round(as.numeric(timings[[key]] %||% 0) + max(0, as.numeric(difftime(current, started, units = "secs"))), 1)
+      old$step_timings <- timings
+    }
+  }
+  old$step <- as.character(step)[1]
+  old$step_started_at <- now
+  old$last_event_at <- old$last_event_at %||% now
+  old$done <- FALSE
+  old$error <- NULL
+  if (!is.null(inputs)) old$inputs <- inputs
+  progress_write(project, dataset, node, side, old)
+}
+
+progress_event <- function(project, dataset, node, side, event) {
+  old <- progress_read(project, dataset, node, side)
+  if (is.null(old)) old <- list(step = "inputs", step_started_at = now_iso(), inputs = list())
+  line <- gsub("[[:cntrl:]]+", " ", as.character(event %||% "")[1])
+  line <- trimws(substr(line, 1, 160))
+  if (!nzchar(line)) return(invisible(old))
+  old$events <- c(old$events %||% list(), list(line))
+  if (length(old$events) > 30L) old$events <- tail(old$events, 30L)
+  old$last_event_at <- now_iso()
+  progress_write(project, dataset, node, side, old)
+}
+
+progress_finish <- function(project, dataset, node, side, error = NULL) {
+  old <- progress_read(project, dataset, node, side)
+  if (is.null(old)) old <- list(events = list(), inputs = list())
+  if (!is.null(old$step) && !is.null(old$step_started_at)) {
+    started <- suppressWarnings(as.POSIXct(old$step_started_at, tz = "UTC"))
+    current <- suppressWarnings(as.POSIXct(now_iso(), tz = "UTC"))
+    if (is.finite(as.numeric(started)) && is.finite(as.numeric(current))) {
+      timings <- old$step_timings %||% list()
+      key <- as.character(old$step)[1]
+      timings[[key]] <- round(as.numeric(timings[[key]] %||% 0) + max(0, as.numeric(difftime(current, started, units = "secs"))), 1)
+      old$step_timings <- timings
+    }
+  }
+  old$done <- TRUE
+  old$error <- if (is.null(error) || !length(error) || !nzchar(as.character(error)[1])) NULL else
+    substr(gsub("[[:cntrl:]]+", " ", as.character(error)[1]), 1, 160)
+  old$last_event_at <- now_iso()
+  progress_write(project, dataset, node, side, old)
+}
+
 review_remove <- function(project, dataset, node, side) unlink(review_path(project, dataset, node, side))
 
 review_code_hash <- function(project, dataset, node, side) {
@@ -95,8 +172,6 @@ self_review_prompt <- function(project, dataset, node, side, spec, graph, user_i
   keys_step <- identical(ni$kind,"records")
   keys <- spec_key_names(spec,dataset)
   if (isTRUE(graph$layered) && !is.null(ni$paramcd)) keys <- layer_key_names(spec,dataset,ni$paramcd,graph,project)
-  if (!isTRUE(graph$layered) && exists("layer_keys_path",mode="function") && file.exists(layer_keys_path(project,dataset)))
-    keys <- layer_key_names(spec,dataset,"*",graph,project)
   dir <- side_run_dir(project, dataset, id, side)
   code <- read_text(file.path(dir, "code.R"))
   approach <- if (isTRUE(graph$layered) && identical(ni$kind,"param_variable")) handling_approach_text(read_json(file.path(dir,"approach.json"))$approach %||% "") else ""

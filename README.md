@@ -34,16 +34,17 @@ The default project is `~/dualdag-projects/default`. Settings are stored in `~/.
 
 ## Try the demos
 
-Run either bundled example from the app folder:
+Run a bundled example from the app folder:
 
 ```sh
 Rscript run_demo_adsl.R
 Rscript run_demo_advs.R
+Rscript run_demo_adppk.R
 ```
 
-The ADSL and ADVS demo specs are included. On the first run, the launcher fetches demo source data from `pharmaversesdtm` and builds the ADVS example data. This step needs internet access and the `pharmaversesdtm` and `haven` R packages (plus `dplyr` for ADVS). The data package is distributed under Apache 2.0; see [demos/README.txt](demos/README.txt).
+The ADSL, ADVS, and ADPPK specs are included. On first run, launchers fetch the needed source datasets from `pharmaversesdtm`; the ADVS and ADPPK projects also build `adsl.xpt` from the committed ADSL spec. ADPPK uses EX, PC, VS, LB, and ADSL inputs. Fetching needs internet access and the `pharmaversesdtm` and `haven` R packages (plus `dplyr` for derived ADSL). The source data package is distributed under Apache 2.0; see [demos/README.txt](demos/README.txt).
 
-To fetch or refresh data explicitly, run `Rscript tools/get_demo_data.R adsl`, `Rscript tools/get_demo_data.R advs`, or `Rscript tools/get_demo_data.R all`.
+To fetch or refresh data explicitly, run `Rscript tools/get_demo_data.R adsl`, `Rscript tools/get_demo_data.R advs`, `Rscript tools/get_demo_data.R adppk`, or `Rscript tools/get_demo_data.R all`.
 
 ## What you can do
 

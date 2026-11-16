@@ -23,6 +23,46 @@ keys_pump_batch <- function(A,timeout=120) {
   }
 }
 
+test_that("spec key resolver orders USUBJID first and Key numbers rather than rows", {
+  spec <- spec_of(V("X","B",key=2),V("X","USUBJID",key=9),V("X","A",key=1))
+  expect_identical(dataset_keys(spec,"X"),c("USUBJID","A","B"))
+  spec$variables$Key[spec$variables$Variable == "USUBJID"] <- NA_integer_
+  expect_identical(dataset_keys(spec,"X"),c("USUBJID","A","B"))
+})
+
+test_that("layer key ordering places PARAMCD at its spec position or after USUBJID", {
+  spec <- spec_of(V("X","B",key=3),V("X","PARAMCD",key=2),V("X","USUBJID",key=7),V("X","A",key=1))
+  expect_identical(layer_key_names(spec,"X","P"),c("USUBJID","A","PARAMCD","B"))
+  spec$variables$Key[spec$variables$Variable == "PARAMCD"] <- NA_integer_
+  expect_identical(layer_key_names(spec,"X","P"),c("USUBJID","PARAMCD","A","B"))
+})
+
+test_that("legacy override values do not influence resolved keys", {
+  p <- open_project(tempfile("ignored-key-file-"))
+  spec <- spec_of(V("X","B",key=2),V("X","USUBJID",key=1),V("X","A",key=3))
+  layer_keys_write(p,"X",list("*"="A",P="A"))
+  expect_identical(layer_key_names(spec,"X","*",project=p),c("USUBJID","B","A"))
+  expect_identical(layer_key_names(spec,"X","P",project=p),c("USUBJID","PARAMCD","B","A"))
+})
+
+test_that("layered Full Run and compare resolve identical spec-only keys", {
+  root <- tempfile("layered-key-agreement-"); dir.create(file.path(root,"spec"),recursive=TRUE); dir.create(file.path(root,"data"))
+  writeLines(c("Dataset,Variable,Label,Type,Length,Key,Source,Derivation",
+    "X,USUBJID,Subject,Char,20,8,,","X,K,Key,Num,8,1,,","X,PARAMCD,Parameter,Char,8,3,,","X,AVAL,Value,Num,8,,,"),file.path(root,"spec","variable.csv"))
+  writeLines(c("Dataset,PARAMCD,PARAM,Source,Derivation","X,P,Value,,"),file.path(root,"spec","parameter.csv"))
+  p <- open_project(root); spec <- read_project_spec(p); g <- graph_skeleton(spec,"X"); save_graph(p,g)
+  plan <- fullrun_plan(p,"X","primary",g,spec)
+  expect_identical(plan$keys,c("USUBJID","K","PARAMCD"))
+  rec <- graph_node(g,"X.RECORDS@P")
+  for(side in c("primary","validation")) {
+    d <- side_run_dir(p$dir,"X",rec,side); dir.create(d,recursive=TRUE,showWarnings=FALSE)
+    saveRDS(data.frame(USUBJID="S1",K=1),file.path(d,"out.rds"))
+  }
+  cmp <- compare_node(p$dir,"X",rec,dataset_keys(spec,"X"))
+  expect_match(cmp$summary,"PARAMCD",fixed=TRUE)
+  expect_identical(layer_key_names(spec,"X","P",g,p),plan$keys)
+})
+
 test_that("layered ADVS keeps keys only on Records and no USUBJID node", {
   advs<-file.path(keys_test_root,"examples/pharmaverse-demo/spec/advs")
   spec<-read_fixture_spec(file.path(advs,"variable.csv"),file.path(advs,"parameter.csv"))
@@ -118,9 +158,9 @@ test_that("fresh multi-key extraction, batch, NA compare and full run use one Re
   }
   layer_keys_write(p,"ADAE",list("*"="SEQPLUS"))
   override_prompt <- side_generation_system_prompt("primary",spec,g,key_node,p)
-  expect_match(override_prompt,"KEYS: USUBJID,SEQPLUS",fixed=TRUE)
-  expect_false(grepl('LINEAGE_ADAE[["AESEQ"]]',override_prompt,fixed=TRUE))
-  expect_true(grepl('LINEAGE_ADAE[["SEQPLUS"]]',override_prompt,fixed=TRUE))
+  expect_match(override_prompt,"KEYS: USUBJID,AESEQ",fixed=TRUE)
+  expect_true(grepl('LINEAGE_ADAE[["AESEQ"]]',override_prompt,fixed=TRUE))
+  expect_false(grepl('LINEAGE_ADAE[["SEQPLUS"]]',override_prompt,fixed=TRUE))
 })
 
 test_that("saved legacy compound-key graphs load unchanged and request re-extraction", {

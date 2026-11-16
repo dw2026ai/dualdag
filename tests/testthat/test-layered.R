@@ -405,9 +405,8 @@ test_that("layered Keys prompts use key-column wording on both sides and chat pa
   }
   layer_keys_write(fx$p,"X",list(P="BVAL"))
   overridden <- side_generation_system_prompt("primary",fx$spec,fx$graph,node,fx$p)
-  expect_match(overridden,"KEYS: USUBJID,PARAMCD,BVAL",fixed=TRUE)
-  expect_false(grepl('LINEAGE_P[["AVAL"]]',overridden,fixed=TRUE))
-  expect_true(grepl('LINEAGE_P[["BVAL"]]',overridden,fixed=TRUE))
+  expect_match(overridden,"KEYS: USUBJID,PARAMCD",fixed=TRUE)
+  expect_false(grepl('LINEAGE_P[["BVAL"]]',overridden,fixed=TRUE))
 })
 
 test_that("primary explicit source refs in the node spec override lineage", {
@@ -522,95 +521,38 @@ test_that("model extraction assigns different layer keys and missing layers use 
     else if(grepl("TASK: extract_check",system,fixed=TRUE))'{"cut":[]}'
     else json_text(setNames(lapply(regmatches(user,gregexpr("(?<=ROW )[VP][0-9]+",user,perl=TRUE))[[1]],function(x)list()),regmatches(user,gregexpr("(?<=ROW )[VP][0-9]+",user,perl=TRUE))[[1]])),model="fake")},.GlobalEnv)
   g<-extract_dependencies(list(),sp,"X",project=fx$p)
-  expect_setequal(g$layer_keys$P,c("USUBJID","PARAMCD","BVAL"))
-  expect_setequal(g$layer_keys$BMI,c("USUBJID","PARAMCD","ATPTN"))
+  expect_setequal(g$layer_keys$P,c("USUBJID","PARAMCD"))
+  expect_setequal(g$layer_keys$BMI,c("USUBJID","PARAMCD"))
   expect_setequal(g$layer_keys$Q,c("USUBJID","PARAMCD"))
   ids<-vapply(g$nodes,`[[`,"","id")
-  expect_false("X.BVAL@P"%in%ids);expect_true("X.BVAL@Q"%in%ids)
-  expect_false("X.ATPTN@BMI"%in%ids);expect_true("X.ATPTN@P"%in%ids)
+  expect_true("X.BVAL@P"%in%ids);expect_true("X.BVAL@Q"%in%ids)
+  expect_true("X.ATPTN@BMI"%in%ids);expect_true("X.ATPTN@P"%in%ids)
   expect_true(grepl("a derived parameter may not have a time point",extract_plan_prompt("X"),fixed=TRUE))
 })
 
-test_that("layer key edits dry run, reset the layer and descendants, and reject invalid keys", {
-  fx<-layered_test_project(c("P","BMI"),edges=list(list(from="P",to="BMI",uses=list(list(from_var="AVAL",to_var="AVAL")))));fx$graph$extraction<-list(edges=list(),external=list(),unresolved=list(),categories=list());save_graph(fx$proj,fx$graph)
-  p_id<-"X.AVAL@P";bmi_id<-"X.AVAL@BMI"
-  for(id in c(p_id,bmi_id)){st<-get_status(fx$proj,"X",id);st$level<-"L3";put_status(fx$proj,"X",id,st)}
-  code_path<-file.path(node_run_dir(fx$proj,"X",p_id),"primary","code.R");dir.create(dirname(code_path),recursive=TRUE);writeLines("result <- 1",code_path)
-  desired<-c("USUBJID","PARAMCD","BVAL")
-  dry<-layer_keys_set(fx$proj,"X","P",desired,TRUE)
-  expect_true(dry$reset_count>0L);expect_length(layer_keys_read(fx$proj,"X"),0L)
-  changed<-layer_keys_set(fx$proj,"X","P",desired,FALSE)
-  expect_true(file.exists(layer_keys_path(fx$proj,"X")))
-  expect_false("X.BVAL@P"%in%vapply(load_graph(fx$proj,"X")$nodes,`[[`,"","id"))
-  expect_identical(get_status(fx$proj,"X",p_id)$level,"none")
-  expect_identical(get_status(fx$proj,"X",bmi_id)$level,"none")
-  expect_false(file.exists(code_path))
-  expect_error(layer_keys_set(fx$proj,"X","P",c("PARAMCD","BVAL"),TRUE),"cannot be removed")
-  fx_ds<-layered_test_project(c("P"),dataset_level=TRUE)
-  expect_error(layer_keys_set(fx_ds$proj,"X","P",c("USUBJID","PARAMCD","STUDYID"),TRUE),"Dataset-level")
-  model_graph<-graph_skeleton(fx$spec,"X",list(P=c("USUBJID","PARAMCD","AVAL"),BMI=c("USUBJID","PARAMCD")))
-  model_graph$extraction<-list(edges=list(),external=list(),unresolved=list(),categories=list())
-  layer_keys_write(fx$proj,"X",list(P="BVAL",BMI="AVISITN"))
-  extract_reply_write(fx$proj,"X",list(edges=list(),external=list(),unresolved=list()))
-  store_extracted(list(project=fx$proj),"X",model_graph)
-  expect_setequal(layer_keys_read(fx$proj,"X")$P,"BVAL")
-  expect_false(is.null(extract_reply_read(fx$proj,"X")))
-  expect_setequal(load_graph(fx$proj,"X")$layer_keys$P,c("USUBJID","PARAMCD","AVAL"))
+test_that("legacy layer key files do not alter graph keys", {
+  fx <- layered_test_project(c("P", "BMI"))
+  path <- layer_keys_path(fx$p,"X")
+  layer_keys_write(fx$p,"X",list(P="BVAL",BMI="AVAL"))
+  before <- readLines(path,warn=FALSE)
+  fresh <- graph_skeleton(fx$spec,"X",layer_keys_read(fx$p,"X"))
+  expect_setequal(fresh$layer_keys$P,c("USUBJID","PARAMCD"))
+  expect_true("X.BVAL@P" %in% vapply(fresh$nodes,`[[`,"","id"))
+  expect_identical(readLines(path,warn=FALSE),before)
 })
 
-test_that("changing the carry group key set resets descendants through member dependencies", {
-  fx <- layered_test_project(c("CO1","CO2","DER"), edges=list(list(from="CO1",to="DER",uses=list(list(from_var="AVAL",to_var="AVAL")))))
-  graph <- graph_skeleton(fx$spec,"X",carry_members=c("CO1","CO2"))
-  graph$extraction <- list(parameter_classification=list(parameters=list(list(paramcd="CO1",classification="carry_over"),list(paramcd="CO2",classification="carry_over"),list(paramcd="DER",classification="derived"))),edges=list(),external=list(),unresolved=list())
-  save_graph(fx$proj,graph)
-  param_graph_write(fx$proj,list(dataset="X",carry_members=list("CO1","CO2"),edges=list(list(from="CO1",to="DER",uses=list()))))
-  dry <- layer_keys_set(fx$proj,"X","CARRY_OVER",c("USUBJID","PARAMCD","AVAL"),TRUE)
-  expect_true(dry$reset_count>0L)
-  expect_true("DER" %in% dry$affected_layers)
-  changed <- layer_keys_set(fx$proj,"X","CARRY_OVER",c("USUBJID","PARAMCD","AVAL"),FALSE)
-  expect_true("DER" %in% changed$affected_layers)
-})
-
-test_that("explicit carry group keys replace member keys and persist through API reload and removal", {
-  fx <- layered_test_project(c("CO1", "CO2", "DER"), edges=list(list(from="CO1",to="DER",uses=list())))
-  variable_path <- file.path(fx$p,"spec","variable.csv")
-  writeLines(c(readLines(variable_path,warn=FALSE),"X,ADT,Date,Num,8,,VS.VSDTC,Date"),variable_path)
-  fx$spec <- read_project_spec(fx$p)
-  graph <- graph_skeleton(fx$spec,"X",list(CO1="ADT",CO2="ADT"),c("CO1","CO2"))
-  graph$extraction <- list(parameter_classification=list(parameters=list(
-    list(paramcd="CO1",classification="carry_over"),list(paramcd="CO2",classification="carry_over"),
-    list(paramcd="DER",classification="derived"))),edges=list(),external=list(),unresolved=list())
-  save_graph(fx$proj,graph)
-  app <- create_app(layered_test_root, fx$p, 7996L, "carry-key-token", load_config())
-  on.exit(shutdown_app(app), add=TRUE)
-  call <- function(body) {
-    raw <- charToRaw(as.character(to_json(body)))
-    req <- list(PATH_INFO="/api/layer-keys",REQUEST_METHOD="POST",QUERY_STRING="",
-      HTTP_HOST="127.0.0.1:7996",HTTP_X_DUALDAG_TOKEN=app$token,CONTENT_TYPE="application/json",
-      rook.input=list(read=function()raw))
-    make_handlers(app)$call(req)
-  }
-  keys <- c("USUBJID","PARAMCD")
+test_that("legacy layer key endpoint rejects per-parameter writes", {
+  fx <- layered_test_project(c("CO1","CO2","DER"))
   layer_keys_write(fx$p,"X",list(CO1="ADT",CO2="ADT"))
-  save_graph(fx$proj,graph)
-  first_response <- call(list(dataset="X",paramcd="CARRY_OVER",keys=keys,dry_run=FALSE))
-  expect_equal(first_response$status,200L,info=as.character(first_response$body))
-  first <- from_json(first_response$body)
-  expect_false(first$dry_run)
-  saved <- layer_keys_read(fx$p,"X")
-  expect_true("CARRY_OVER" %in% names(saved))
-  expect_setequal(saved$CARRY_OVER,character())
-  reloaded <- graph_skeleton(fx$spec,"X",saved,c("CO1","CO2"))
-  expect_setequal(reloaded$layer_keys$CARRY_OVER,keys)
-  expect_false("AVAL" %in% reloaded$layer_keys$CARRY_OVER)
-  add <- from_json(call(list(dataset="X",paramcd="CARRY_OVER",keys=c("USUBJID","PARAMCD","ADT"),dry_run=FALSE))$body)
-  expect_false(add$dry_run)
-  expect_true("ADT" %in% graph_skeleton(fx$spec,"X",layer_keys_read(fx$p,"X"),c("CO1","CO2"))$layer_keys$CARRY_OVER)
-  removed <- from_json(call(list(dataset="X",paramcd="CARRY_OVER",keys=c("USUBJID","PARAMCD"),dry_run=FALSE))$body)
-  expect_false(removed$dry_run)
-  after_remove <- graph_skeleton(fx$spec,"X",layer_keys_read(fx$p,"X"),c("CO1","CO2"))
-  expect_false("ADT" %in% after_remove$layer_keys$CARRY_OVER)
-  expect_false("AVAL" %in% after_remove$layer_keys$CARRY_OVER)
+  before <- readLines(layer_keys_path(fx$p,"X"),warn=FALSE)
+  app <- create_app(layered_test_root,fx$p,7996L,"carry-key-token",load_config()); on.exit(shutdown_app(app),add=TRUE)
+  raw <- charToRaw(as.character(to_json(list(dataset="X",paramcd="CO1",keys=c("USUBJID","PARAMCD","ADT")))))
+  req <- list(PATH_INFO="/api/layer-keys",REQUEST_METHOD="POST",QUERY_STRING="",HTTP_HOST="127.0.0.1:7996",HTTP_X_DUALDAG_TOKEN=app$token,CONTENT_TYPE="application/json",rook.input=list(read=function()raw))
+  res <- make_handlers(app)$call(req)
+  expect_equal(res$status,400L)
+  expect_match(res$body,"dataset-wide",fixed=TRUE)
+  expect_identical(readLines(layer_keys_path(fx$p,"X"),warn=FALSE),before)
+  expect_setequal(graph_skeleton(fx$spec,"X",layer_keys_read(fx$p,"X"),c("CO1","CO2"))$layer_keys$CARRY_OVER,c("USUBJID","PARAMCD"))
 })
 
 test_that("single layer extraction merges only its parameter and blocks overlapping extraction", {
@@ -662,7 +604,7 @@ test_that("single layer extraction merges only its parameter and blocks overlapp
   expect_identical(Filter(function(e) grepl("@C$",e$to),after$edges),snapshots$C)
   expect_identical(get_status(app$project,"X",child_id)$level,"none")
   expect_true("C" %in% toupper(flat_chr(after$generated_parameters)))
-  # Each generated layer updates the stored reply, so later key changes keep every layer.
+  # Each generated layer updates the stored reply, so later extraction keeps every layer.
   expect_identical(extract_reply_read(fx$proj,"X")$marker,"P")
 })
 
@@ -674,28 +616,24 @@ test_that("parameter layer blockers run only for BDS formats", {
   expect_match(param_layer_block_message(fx$proj,"X","primary","Q",fx$spec,fx$param),"blocked by unfinished layer")
 })
 
-test_that("DAG agent applies scoped layer key changes immediately", {
-  fx<-layered_test_project(c("P","Q"),dataset_level=TRUE);fx$graph$extraction<-list(edges=list(),external=list(),unresolved=list(),categories=list());save_graph(fx$proj,fx$graph)
-  old<-get("llm_chat",envir=.GlobalEnv);on.exit(assign("llm_chat",old,.GlobalEnv),add=TRUE)
-  assign("llm_chat",function(cfg,system,user,...)list(text=fake_dag_reply(system,user),model="fake"),.GlobalEnv)
-  res<-dag_ask(list(),fx$p,"X","these are keys",paramcd="P",selected="X.BVAL@P")
-  expect_identical(res$changes[[1]]$op,"set_layer_keys")
-  expect_identical(res$changes[[1]]$paramcd,"P")
-  expect_true("BVAL"%in%unlist(res$changes[[1]]$added))
-  expect_true("BVAL"%in%layer_key_names(fx$spec,"X","P",load_graph(fx$proj,"X"),fx$p))
-  expect_false("BVAL"%in%layer_key_names(fx$spec,"X","Q",load_graph(fx$proj,"X"),fx$p))
-  expect_true(any(grepl("Parameter layer keys updated",vapply(res$card,function(x)x$text,""),fixed=TRUE)))
+test_that("DAG agent refuses per-parameter key changes with a clear explanation", {
+  fx <- layered_test_project(c("P","Q"),dataset_level=TRUE); fx$graph$extraction <- list(edges=list(),external=list(),unresolved=list(),categories=list()); save_graph(fx$proj,fx$graph)
+  old <- get("llm_chat",envir=.GlobalEnv); on.exit(assign("llm_chat",old,.GlobalEnv),add=TRUE)
+  assign("llm_chat",function(...)list(text=json_text(list(answer="Keys are dataset-wide.",changes=list(list(op="set_layer_keys",paramcd="P",keys=c("USUBJID","PARAMCD","BVAL"))),correction=NULL)),model="fake"),.GlobalEnv)
+  res <- dag_ask(list(),fx$p,"X","Set keys for P only",paramcd="P")
+  expect_length(res$changes,0L)
+  expect_match(res$answer,"dataset-wide",ignore.case=TRUE)
+  expect_match(res$answer,"spec",ignore.case=TRUE)
 })
 
-test_that("POST layer-keys supports dry run and apply", {
-  fx<-layered_test_project(c("P"));fx$graph$extraction<-list(edges=list(),external=list(),unresolved=list(),categories=list());save_graph(fx$proj,fx$graph)
-  app<-create_app(layered_test_root,fx$p,7995L,"layer-key-token",load_config())
-  on.exit(shutdown_app(app),add=TRUE)
-  call<-function(body){raw<-charToRaw(as.character(to_json(body)));req<-list(PATH_INFO="/api/layer-keys",REQUEST_METHOD="POST",QUERY_STRING="",HTTP_HOST="127.0.0.1:7995",HTTP_X_DUALDAG_TOKEN=app$token,CONTENT_TYPE="application/json",rook.input=list(read=function()raw));make_handlers(app)$call(req)}
-  dry<-from_json(call(list(dataset="X",paramcd="P",keys=c("USUBJID","PARAMCD","BVAL"),dry_run=TRUE))$body)
-  expect_true(dry$reset_count>0L);expect_length(layer_keys_read(fx$p,"X"),0L)
-  applied<-from_json(call(list(dataset="X",paramcd="P",keys=c("USUBJID","PARAMCD","BVAL"),dry_run=FALSE))$body)
-  expect_false(applied$dry_run);expect_true("BVAL"%in%layer_key_names(fx$spec,"X","P",load_graph(fx$p,"X"),fx$p))
+test_that("POST layer-keys refuses the retired mutation path", {
+  fx <- layered_test_project(c("P")); app <- create_app(layered_test_root,fx$p,7995L,"layer-key-token",load_config()); on.exit(shutdown_app(app),add=TRUE)
+  raw <- charToRaw(as.character(to_json(list(dataset="X",paramcd="P",keys=c("USUBJID","PARAMCD","BVAL"),dry_run=FALSE))))
+  req <- list(PATH_INFO="/api/layer-keys",REQUEST_METHOD="POST",QUERY_STRING="",HTTP_HOST="127.0.0.1:7995",HTTP_X_DUALDAG_TOKEN=app$token,CONTENT_TYPE="application/json",rook.input=list(read=function()raw))
+  res <- make_handlers(app)$call(req)
+  expect_equal(res$status,400L)
+  expect_match(res$body,"variable.csv Key",fixed=TRUE)
+  expect_length(layer_keys_read(fx$p,"X"),0L)
 })
 
 test_that("fake layered generation builds collected layers and a BMI-like layer through full run", {
@@ -802,7 +740,7 @@ test_that("real layer jobs fill one layer at a time and a key change keeps every
   expect_setequal(unlist(lapply(reply$external,function(x)flat_chr(x$params))),c("P","Q"))
   expect_true(isTRUE(reply$no_source_spread))
   expect_true(file.exists(extract_plan_path(fx$proj,"X")))
-  layer_keys_set(fx$proj,"X","P",c("USUBJID","PARAMCD","BVAL"))
+  layer_keys_write(fx$p,"X",list(P="BVAL"))
   changed<-load_graph(fx$proj,"X")
   expect_setequal(toupper(flat_chr(changed$generated_parameters)),c("P","Q"))
   expect_true(any(vapply(changed$external,function(x)"X.AVAL@Q"%in%flat_chr(x$used_by),TRUE)))

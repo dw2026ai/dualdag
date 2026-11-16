@@ -112,11 +112,11 @@ test_that("the strong model plans and checks, the Settings model reads rows, and
   expect_setequal(vapply(s2$log$calls, function(x) x$model, ""), "normal")
 })
 
-test_that("config keeps the strong model, with a blank default", {
+test_that("config keeps the strong model and upgrades blank tiers to defaults", {
   home <- tempfile("xl-home-"); dir.create(home)
   old <- Sys.getenv("DUALDAG_HOME"); Sys.setenv(DUALDAG_HOME = home)
   on.exit(Sys.setenv(DUALDAG_HOME = old), add = TRUE)
-  expect_identical(load_config()$strong_model, "")
+  expect_identical(load_config()$strong_model, "gpt-6.1-terra")
   cfg <- load_config(); cfg$strong_model <- "big"; save_config(cfg)
   expect_identical(load_config()$strong_model, "big")
   expect_identical(config_public(load_config())$strong_model, "big")
@@ -542,7 +542,7 @@ test_that("carry group keys and semantic parameter layer identities remain disti
     "ADX,CARRY_OVER,Real group-like,ADX,Derived", "ADX,PARAM_CARRY_OVER,Real prefixed,ADX,Derived"), file.path(d,"parameter.csv"))
   spec <- read_spec(file.path(d,"variable.csv"),file.path(d,"parameter.csv"))
   graph <- graph_skeleton(spec,"ADX",list(CARRY_OVER=c("USUBJID","PARAMCD","ADT")),"CO1")
-  expect_setequal(graph$layer_keys$CARRY_OVER,c("USUBJID","PARAMCD","ADT"))
+  expect_setequal(graph$layer_keys$CARRY_OVER,c("USUBJID","PARAMCD"))
   expect_length(unique(vapply(graph$layers, `[[`, "", "paramcd")),3L)
   expect_identical(graph$layers[[1]]$paramcd,"CARRY_OVER")
   expect_true(any(vapply(graph$layers,function(x) "CARRY_OVER" %in% x$members_parameters,TRUE)))

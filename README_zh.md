@@ -39,11 +39,12 @@ Rscript run.R --restore-admin-snapshot --project=~/studies/study-01
 ```sh
 Rscript run_demo_adsl.R
 Rscript run_demo_advs.R
+Rscript run_demo_adppk.R
 ```
 
-ADSL 和 ADVS 示例 spec 已包含在下载包中。首次运行时，启动脚本会从 `pharmaversesdtm` 获取示例源数据，并生成 ADVS 示例数据。此步骤需要联网，以及 `pharmaversesdtm` 和 `haven` R 包（ADVS 还需要 `dplyr`）。该数据包使用 Apache 2.0 许可证，详见 [demos/README.txt](demos/README.txt)。
+ADSL、ADVS 和 ADPPK 示例 spec 已包含在下载包中。首次运行时，启动脚本会从 `pharmaversesdtm` 获取所需数据；ADVS 和 ADPPK 项目还会依据已提交的 ADSL spec 生成 `adsl.xpt`。ADPPK 使用 EX、PC、VS、LB 和 ADSL 输入。此步骤需要联网，以及 `pharmaversesdtm` 和 `haven` R 包（生成 ADSL 还需要 `dplyr`）。数据包使用 Apache 2.0 许可证，详见 [demos/README.txt](demos/README.txt)。
 
-也可以手动获取或更新数据：运行 `Rscript tools/get_demo_data.R adsl`、`Rscript tools/get_demo_data.R advs` 或 `Rscript tools/get_demo_data.R all`。
+也可以手动获取或更新数据：运行 `Rscript tools/get_demo_data.R adsl`、`Rscript tools/get_demo_data.R advs`、`Rscript tools/get_demo_data.R adppk` 或 `Rscript tools/get_demo_data.R all`。
 
 ## 应用功能
 

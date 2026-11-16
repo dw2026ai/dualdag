@@ -817,14 +817,22 @@ local_data_index <- function(project) {
   out
 }
 
-dataset_keys <- function(spec, ds) {
+key_names <- function(spec, ds, layer = NULL) {
   if (is.null(spec) || !nrow(spec$variables)) return(character())
   v <- spec$variables
-  v <- v[v$Dataset == ds & !is.na(v$Key), , drop = FALSE]
+  v <- v[toupper(v$Dataset) == toupper(ds), , drop = FALSE]
   if (!nrow(v)) return(character())
-  v <- v[order(v$Key), , drop = FALSE]
-  as.character(v$Variable)
+  key <- suppressWarnings(as.integer(v$Key))
+  marked <- v[!is.na(key) & key > 0L, , drop = FALSE]
+  ord <- order(suppressWarnings(as.integer(marked$Key)), seq_len(nrow(marked)))
+  names <- toupper(trimws(as.character(marked$Variable[ord])))
+  names <- unique(names[nzchar(names)])
+  if (is.null(layer) || identical(toupper(as.character(layer)[1]), "*")) return(c("USUBJID", setdiff(names, "USUBJID")))
+  if ("PARAMCD" %in% names) return(c("USUBJID", setdiff(names, "USUBJID")))
+  c("USUBJID", "PARAMCD", setdiff(names, c("USUBJID", "PARAMCD")))
 }
+
+dataset_keys <- function(spec, ds) key_names(spec, ds)
 
 dataset_node_ids <- function(p, spec, ds) {
   g <- load_graph(p, ds)

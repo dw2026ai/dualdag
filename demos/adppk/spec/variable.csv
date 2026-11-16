@@ -1,0 +1,68 @@
+Dataset,Variable,Label,Type,Length,Key,Source,Derivation
+ADPPK,PROJID,Project Identifier,Char,100,,EX.EXTRT; PC.PCTEST,"On expanded dose rows, copy EX.EXTRT. On concentration rows, copy PC.PCTEST. This value identifies the drug and is used to match each concentration record to doses for the same subject and drug."
+ADPPK,PROJIDN,Project Identifier (N),Float,8,,ADPPK.PROJID,Set to 1 on every row.
+ADPPK,STUDYID,Study Identifier,Char,21,1,PC.STUDYID,Copy STUDYID from the source EX or PC record.
+ADPPK,STUDYIDN,Study Identifier (N),Float,8,,ADPPK.USUBJID,"Parse the first hyphen-delimited component of USUBJID as numeric. For the source study, 01 becomes 1; the workbook codelist assigns code 1 to CDISCPILOT01."
+ADPPK,PART,Part of the Study,Integer,8,,ADPPK.USUBJID,Set to 1 on every row.
+ADPPK,SUBJTYP,Subject Type,Integer,8,,,"Set to 1 on every row, the numeric codelist code for Volunteer."
+ADPPK,SUBJTYPC,Subject Type (C),Char,100,,,"Set to Volunteer on every row, the codelist value corresponding to SUBJTYP=1."
+ADPPK,USUBJID,Unique Subject Identifier,Char,30,2,PC.USUBJID,Copy USUBJID from the source EX or PC record.
+ADPPK,USUBJIDN,Unique Subject Identifier (N),Float,8,,ADPPK.USUBJID,Convert the third hyphen-delimited component of USUBJID to numeric.
+ADPPK,SUBJID,Subject Identifier for the Study,Char,8,,ADSL.SUBJID,Copy ADSL.SUBJID for the matching STUDYID and USUBJID.
+ADPPK,SUBJIDN,Subject Identifier for the Study (N),Float,8,,ADPPK.SUBJID,Convert SUBJID to numeric.
+ADPPK,SITEID,Study Site Identifier,Char,8,,ADSL.SITEID,Copy ADSL.SITEID for the matching subject.
+ADPPK,SITEIDN,Study Site Identifier (N),Float,8,,ADPPK.USUBJID,Convert the second hyphen-delimited component of USUBJID to numeric.
+ADPPK,RECSEQ,Record Sequence,Integer,8,,ADPPK,"Before assigning RECSEQ, sort the combined retained rows by numeric STUDYIDN, numeric USUBJIDN, AFRLT, and EVID in ascending order. Assign consecutive integers starting at 1 as RECSEQ. After covariates are added, sort the output by the available ADPPK key fields STUDYID, USUBJID, AFRLT, EVID, and CMT in ascending order; RECSEQ retains the sequence assigned before that final sort."
+ADPPK,AFRLT,Actual Rel Time from First Dose,Float,8,3,PC.PCDTC; EX.EXSTDTC; EX.EXENDTC; PC.PCTEST; EX.EXTRT,"For each subject and drug, find the earliest expanded positive-dose EX datetime, ordered by ADTM then EXSEQ. For every dose and concentration record, calculate the elapsed actual time in hours from that first-dose datetime to the record ADTM. Keep fractional hours; concentration date-times with no time are imputed to 00:00:00."
+ADPPK,RLTU,Relative Time Unit,Char,8,,ADPPK,Set to lowercase h on every row.
+ADPPK,APRLT,Actual Rel Time from Previous Dose,Float,8,,EX.EXSTDTC; EX.EXENDTC; ADPPK.AFRLT,"Set to 0 on dose rows. On a concentration row, calculate elapsed actual hours from the latest dose datetime strictly earlier than the concentration ADTM. If there is no earlier dose, copy AFRLT."
+ADPPK,NFRLT,Nominal Rel Time from First Dose,Float,8,,PC.PCTPT; PC.VISITDY; EX.VISITDY,"For EX rows, calculate (VISITDY - 1) × 24 hours. For PC rows, calculate (VISITDY - 1) × 24 plus the nominal timepoint in hours. Convert a single timepoint to its stated hours or minutes divided by 60. For a range timepoint, use its midpoint: 0-6h=3, 6-12h=9, 12-24h=18, and 24-48h=36. Pre-dose is 0 hours. The example uses first_dose_day=1 and outputs HOURS."
+ADPPK,NPRLT,Nominal Rel Time from Previous Dose,Float,8,,PC.VISITDY; PC.PCTPT; EX.VISITDY; EX.EXDOSFRQ,"Set to 0 on dose rows. On a concentration row, find the dose with the greatest NFRLT strictly less than the concentration NFRLT and subtract that dose NFRLT. If no earlier nominal dose exists, subtract the minimum NFRLT for the same subject and drug."
+ADPPK,OCC,Occasion,Float,8,,ADPPK,Set to 1 on every row.
+ADPPK,EXCLF,Record Exclusion,Float,8,,ADPPK.EXCLFCOM,"Set to 0 on every row, the numeric codelist code for EXCLFCOM=None."
+ADPPK,EXCLFCOM,Comment for the Record Exclusion,Char,200,,ADPPK,Set to None on every row. The example excludes no records.
+ADPPK,EVID,Event ID,Float,8,4,EX; PC; PC.PCTEST; EX.EXTRT,"Expand only EX records with EXDOSE greater than 0. Make one dose row for each calendar day from EXSTDTC through EXENDTC inclusive for each such EX record, using its EXDOSE and EXTRT. Impute a missing EXENDTC to EXSTDTC and missing dosing times to midnight. Set EVID=1 on each expanded dose row. Stack these rows with PC concentration rows, for which EVID=0. After first-dose, previous-dose, and relative-time derivations, retain only rows whose calendar ADT is on or before the latest PC ADT for that subject and drug. Subjects or drugs without a matched positive-dose first dose contribute no PC rows."
+ADPPK,DVID,Dependent Variable Name,Char,40,,PC.PCTESTCD,"Leave missing on dose rows. On concentration rows, copy PC.PCTESTCD."
+ADPPK,DVIDN,Dependent Variable Name (N),Integer,8,,ADPPK.DVID,"Set to 1 when DVID=XAN, the numeric DVIDN codelist value. Leave missing when DVID is missing."
+ADPPK,CMT,Compartment,Integer,8,5,EX; PC.PCSPEC,Set to 1 on dose rows. On concentration rows set to 2 when PC.PCSPEC=PLASMA; otherwise set to 3.
+ADPPK,DV,Dependent Variable Result,Float,8,,PC.PCSTRESN,"Leave missing on dose rows. On concentration rows, copy numeric PC.PCSTRESN, including zero and missing results."
+ADPPK,AVAL,Analysis Value,Float,8,,ADPPK.DV,Copy DV on every row.
+ADPPK,AVALU,Dependent Variable Unit,Char,10,,PC.PCSTRESU,"Leave missing on dose rows. On concentration rows, copy PC.PCSTRESU."
+ADPPK,USTRESC,Result or Finding in Standard Format,Char,200,,PC.PCSTRESC,"Leave missing on dose rows. On concentration rows, copy PC.PCSTRESC."
+ADPPK,MDV,Missing Dependent Variable Result,Integer,8,,ADPPK.EVID; ADPPK.DV,Set to 1 on every dose row. On concentration rows set to 1 when DV is missing and 0 otherwise.
+ADPPK,BLQFL,Below Lower Limit of Quant Flag,Char,1,,PC.PCSTRESC,"Set to Y when PC.PCSTRESC equals <BLQ. Set to N otherwise, including all dose rows."
+ADPPK,BLQFN,Below Lower Limit of Quant Flag (N),Integer,8,,PC.PCSTRESC,"Set to 1 when PC.PCSTRESC equals <BLQ. Set to 0 otherwise, including all dose rows."
+ADPPK,AMT,Actual Amount of Dose Received (unit),Float,8,,EX.EXDOSE,Copy EXDOSE to dose rows. Leave missing on concentration rows.
+ADPPK,DOSEA,Actual Treatment Dose (unit),Float,8,,EX.EXDOSE; ADPPK.EXDOSE_PREV; ADPPK.EXDOSE_FIRST,"On dose rows, copy EXDOSE for that EX record. On concentration rows, copy EXDOSE from the latest actual dose datetime strictly before ADTM. If no earlier dose exists, use the subject and drug first dose EXDOSE."
+ADPPK,II,Dosing Interval (unit),Integer,8,,ADPPK.EVID,Set to 1 on dose rows and 0 on concentration rows.
+ADPPK,ADDL,number Of Additional Doses,Integer,8,,ADPPK.EVID,Set to 0 on every row.
+ADPPK,SS,Steady State,Integer,8,,ADPPK.EVID,Set to 1 on dose rows and 0 on concentration rows.
+ADPPK,FORM,Drug Formulation,Char,100,,EX.EXDOSFRM,Copy the unique EXDOSFRM value in the source study to every row. The example value is PATCH.
+ADPPK,FORMN,Drug Formulation (N),Integer,8,,ADPPK.FORM,"Set to 3 for FORM=PATCH, the numeric FORMN codelist value."
+ADPPK,ROUTE,Route of Administration,Char,100,,EX.EXROUTE,Copy the unique EXROUTE value in the source study to every row. The example value is TRANSDERMAL.
+ADPPK,ROUTEN,Route of Administration (N),Integer,8,,ADPPK.ROUTE,"Set to 3 for ROUTE=TRANSDERMAL, the numeric ROUTEN codelist value."
+ADPPK,COHORT,Cohort Subject Enrolled Into,Integer,8,,ADSL.ARM,"Map the planned arm: ARMCD Scrnfail to 9, Pbo to 0, Xan_Lo to 1, and Xan_Hi to 2. Equivalently, Screen Failure=9, Placebo=0, Xanomeline Low Dose=1, and Xanomeline High Dose=2."
+ADPPK,COHORTC,Cohort number Subject Enrolled into,Char,40,,ADSL.ARM,"Map the planned arm to its codelist label: Scrnfail to Screen Failure, Pbo to Placebo, Xan_Lo to Xanomeline Low Dose, and Xan_Hi to Xanomeline High Dose."
+ADPPK,UDTC,Date and Time of the Event,Char,19,,ADPPK.ADTM,Format the row ADTM as ISO 8601 date-time YYYY-MM-DDThh:mm:ss. PC times missing in PCDTC are imputed to 00:00:00; expanded EX dose rows occur at midnight.
+ADPPK,WTBL,Baseline Body Weight,Float,8,,VS.VSSTRESN; VS.VSTESTCD; VS.VSBLFL,"For each subject, copy VSSTRESN from the first VS record in source order where VSTESTCD=WEIGHT and VSBLFL=Y."
+ADPPK,HTBL,Baseline Body Height,Float,8,,VS.VSTESTCD; VS.VSSTRESN,"For each subject, copy VSSTRESN from the first VS record in source order where VSTESTCD=HEIGHT. The source program does not require VSBLFL=Y for this height record."
+ADPPK,BMIBL,Baseline Body Mass Index,Float,8,,ADPPK.WTBL; ADPPK.HTBL,"Calculate WTBL divided by (HTBL/100) squared, with height converted from centimetres to metres. Leave missing if either input is missing."
+ADPPK,BSABL,Body Surface Area at Baseline,Float,8,,ADPPK.WTBL; ADPPK.HTBL,Calculate body surface area by the Mosteller formula: square root of (HTBL in centimetres × WTBL in kilograms / 3600). Leave missing if either input is missing.
+ADPPK,AGE,Age at Baseline,Float,8,,ADSL.AGE,Copy ADSL.AGE for the subject.
+ADPPK,SEX,Sex,Char,1,,ADSL.SEX,Copy ADSL.SEX for the subject.
+ADPPK,SEXN,Sex (N),Integer,8,,ADSL.SEX,"Map SEX=M to 1, SEX=F to 2, and SEX=U to 9 using the workbook codelist."
+ADPPK,RACE,Race,Char,60,,ADSL.RACE,Copy ADSL.RACE for the subject.
+ADPPK,RACEN,Race (N),Integer,8,,ADSL.RACE,"Map WHITE to 1, BLACK OR AFRICAN AMERICAN to 2, AMERICAN INDIAN OR ALASKA NATIVE to 3, and ASIAN to 4. Leave missing for any other value."
+ADPPK,AETHNIC,Analysis Ethnicity,Char,100,,ADSL.ETHNIC,Copy ADSL.ETHNIC for the subject into AETHNIC.
+ADPPK,AETHNICN,Analysis Ethnicity (N),Integer,8,,ADSL.ETHNIC,Map NOT HISPANIC OR LATINO to 0 and HISPANIC OR LATINO to 1. Leave missing for any other value.
+ADPPK,REGION1,Geographic Region 1,Char,100,,ADSL.COUNTRY,Copy ADSL.COUNTRY into REGION1.
+ADPPK,REGION1N,Geographic Region 1 (N),Integer,8,,ADSL.COUNTRY,Copy COUNTRYN into REGION1N.
+ADPPK,COUNTRY,Country,Char,3,,ADSL.COUNTRY,Copy ADSL.COUNTRY for the subject.
+ADPPK,COUNTRYL,Country Full Name,Char,100,,ADSL.COUNTRY,Map USA to United States using the COUNTRYL codelist.
+ADPPK,COUNTRYN,Country (N),Integer,8,,ADSL.COUNTRY,Map USA to 1 using the COUNTRYN codelist.
+ADPPK,CREATBL,Baseline Creatinine Serum,Float,8,,LB.LBSTRESN; LB.LBTESTCD; LB.LBBLFL,"For the subject, select LBSTRESN for the LB row with LBBLFL=Y and LBTESTCD=CREAT."
+ADPPK,CRCLBL,Baseline Creatinine Clearance,Float,8,,ADPPK.CREATBL; ADSL.AGE; ADPPK.WTBL; ADSL.SEX,Calculate Cockcroft-Gault creatinine clearance in mL/min from SI serum creatinine CREATBL in µmol/L: ((140 - AGE) × WTBL × 1.23) / CREATBL for SEX=M; use 1.04 instead of 1.23 for SEX=F. Leave missing when any required input is missing.
+ADPPK,EGFRBL,Baseline eGFR,Float,8,,ADPPK.CREATBL; ADSL.AGE; ADSL.SEX,"Calculate 2021 CKD-EPI eGFR in mL/min/1.73 m². Convert CREATBL from µmol/L to standardized serum creatinine SCr in mg/dL by dividing by 88.42. Set κ=0.7 and α=-0.241 for SEX=F; set κ=0.9 and α=-0.302 for SEX=M. Calculate 142 × min(SCr/κ,1)^α × max(SCr/κ,1)^(-1.200) × 0.9938^AGE, and multiply by 1.012 for SEX=F. Leave missing when any required input is missing."
+ADPPK,TBILBL,Baseline Total Bilirubin,Float,8,,LB.LBSTRESN; LB.LBTESTCD; LB.LBBLFL,"For the subject, select LBSTRESN where LBBLFL=Y and LBTESTCD=BILI; rename that baseline value TBILBL."
+ADPPK,ASTBL,Baseline Aspartate transaminase,Float,8,,LB.LBSTRESN; LB.LBTESTCD; LB.LBBLFL,"For the subject, select LBSTRESN where LBBLFL=Y and LBTESTCD=AST."
+ADPPK,ALTBL,Baseline Alanine transaminase,Float,8,,LB.LBSTRESN; LB.LBTESTCD; LB.LBBLFL,"For the subject, select LBSTRESN where LBBLFL=Y and LBTESTCD=ALT."

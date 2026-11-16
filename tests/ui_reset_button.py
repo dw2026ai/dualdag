@@ -72,6 +72,7 @@ def run_browser(browser_type, work, label, executable):
         page.reload()
         page.locator('[data-act="tab"][data-tab="spec"]').click()
         page.get_by_role("tab", name="Variable DAG").click()
+        assert page.get_by_role("button", name="Run whole dataset", exact=True).is_visible()
         assert page.locator('[data-act="zoom-reset"]').count() == 0
         assert page.get_by_role("button", name="Reset", exact=True).count() == 0
 

@@ -10,47 +10,59 @@ admin_fixture <- function() {
   dir.create(file.path(app, "R"), recursive = TRUE); dir.create(file.path(app, "www"), recursive = TRUE)
   dir.create(file.path(project, "spec"), recursive = TRUE); dir.create(file.path(project, "programs"), recursive = TRUE)
   dir.create(file.path(project, ".dualdag", "state"), recursive = TRUE)
+  dir.create(file.path(project,".dualdag","app-admin"),recursive=TRUE)
   writeLines("launcher v1", file.path(app, "run.R")); writeLines("code v1", file.path(app, "R", "boot.R"))
   writeLines("spec v1", file.path(project, "spec", "variable.csv")); writeLines("program v1", file.path(project, "programs", "main.R"))
   writeLines('{"nodes":{}}', file.path(project, ".dualdag", "state", "state.json"))
   list(base=base, app=app, project=project)
 }
 
-test_that("App Admin snapshots only requested files and excludes routine logs", {
+test_that("App Admin snapshots all project files except the snapshot tree", {
   f <- admin_fixture(); on.exit(unlink(f$base, recursive=TRUE), add=TRUE)
   dir.create(file.path(f$project,".dualdag","runs"),recursive=TRUE)
   dir.create(file.path(f$project,".dualdag","llm_log"),recursive=TRUE)
-  dir.create(file.path(f$project,".dualdag","app-admin"),recursive=TRUE)
+  dir.create(file.path(f$project,".git"),recursive=TRUE);dir.create(file.path(f$project,"node_modules","pkg"),recursive=TRUE)
+  dir.create(file.path(f$project,".cache"),recursive=TRUE);dir.create(file.path(f$project,".dualdag","logs"),recursive=TRUE)
   writeLines("run", file.path(f$project,".dualdag","runs","job.log"))
   writeLines("llm", file.path(f$project,".dualdag","llm_log","chat.json"))
+  writeLines("git",file.path(f$project,".git","config"));writeLines("dependency",file.path(f$project,"node_modules","pkg","index.js"))
+  writeLines("cache",file.path(f$project,".cache","item"));writeLines("log",file.path(f$project,".dualdag","logs","app.log"))
   writeLines("session", admin_session_path(f$project))
+  writeLines("{}",file.path(f$project,".dualdag","admin_log.jsonl"))
   snap_id <- admin_snapshot(f$app,f$project)
   snap <- file.path(admin_snapshot_root(f$project),snap_id)
   saved <- read_json(file.path(snap,"manifest.json"))
   expect_true(all(c("app/run.R","app/R/boot.R","project/spec/variable.csv","project/programs/main.R",
                     "project/.dualdag/state/state.json") %in% unlist(saved$snapshot_files)))
-  expect_false(any(grepl("app-admin|/runs/|llm_log", names(saved$manifest))))
-  expect_false("project/.dualdag/state/layout_ADSL.json" %in% unlist(saved$snapshot_files))
+  expect_true(all(c("project/.dualdag/app-admin/session.json","project/.dualdag/runs/job.log",
+                    "project/.dualdag/llm_log/chat.json","project/.dualdag/logs/app.log",
+                    "project/.dualdag/admin_log.jsonl","project/.git/config","project/node_modules/pkg/index.js",
+                    "project/.cache/item") %in% unlist(saved$snapshot_files)))
+  expect_false(any(grepl("admin_snapshots", names(saved$manifest),fixed=TRUE)))
+  expect_identical(admin_snapshot_root(f$project),file.path(f$project,".dualdag","admin_snapshots"))
 })
 
-test_that("Undo refuses later code edits, ignores routine layout writes, warns for hash-only files, and is one-shot", {
+test_that("Undo refuses later in-scope edits and restores small-project data", {
   f <- admin_fixture(); on.exit(unlink(f$base, recursive=TRUE), add=TRUE)
   dir.create(file.path(f$project,"data")); writeBin(as.raw(1:32),file.path(f$project,"data","input.bin"))
   writeBin(as.raw(rep(2L,5*1024^2+1)),file.path(f$project,"notes-large.bin"))
+  writeLines("layout v1",file.path(f$project,".dualdag","state","layout_ADSL.json"))
   id <- admin_snapshot(f$app,f$project)
   writeLines("after",file.path(f$app,"R","boot.R"))
-  admin_finish_snapshot(f$app,f$project,id)
-  writeLines("later",file.path(f$project,".dualdag","state","layout_ADSL.json"))
-  writeLines("later code",file.path(f$app,"R","boot.R"))
+  writeLines("layout after",file.path(f$project,".dualdag","state","layout_ADSL.json"))
   writeBin(as.raw(3:34),file.path(f$project,"data","input.bin"))
   writeBin(as.raw(rep(4L,5*1024^2+1)),file.path(f$project,"notes-large.bin"))
+  admin_finish_snapshot(f$app,f$project,id)
+  writeLines("later code",file.path(f$app,"R","boot.R"))
   expect_error(admin_undo(f$app,f$project),"later change exists")
   writeLines("after",file.path(f$app,"R","boot.R"))
   u <- admin_undo(f$app,f$project)
-  expect_true(u$ok); expect_true(u$data_warning)
-  expect_true(all(c("project/data/input.bin","project/notes-large.bin") %in% unlist(u$hash_only_warnings)))
-  expect_false("project/.dualdag/state/layout_ADSL.json" %in% unlist(u$files))
-  expect_identical(readLines(file.path(f$project,".dualdag","state","layout_ADSL.json")),"later")
+  expect_true(u$ok); expect_false(u$data_warning)
+  expect_true(all(c("project/data/input.bin","project/notes-large.bin") %in% unlist(u$files)),info=paste(unlist(u$files),collapse=", "))
+  expect_identical(readBin(file.path(f$project,"data","input.bin"),"raw",n=32),as.raw(1:32))
+  expect_identical(file.info(file.path(f$project,"notes-large.bin"))$size,5*1024^2+1)
+  expect_true("project/.dualdag/state/layout_ADSL.json" %in% unlist(u$files))
+  expect_identical(readLines(file.path(f$project,".dualdag","state","layout_ADSL.json")),"layout v1")
   expect_identical(admin_undo(f$app,f$project)$message,"Nothing to undo.")
 })
 
@@ -110,25 +122,33 @@ test_that("handle_api records only CLI changes, refuses newer files without muta
   writeLines(c("#!/bin/sh",
     "if [ \"$1\" = --version ]; then echo 'stub Claude 2.0'; exit 0; fi",
     "if [ \"$1\" = auth ] && [ \"$2\" = status ]; then echo '{\"loggedIn\":true,\"authMethod\":\"subscription\"}'; exit 0; fi",
+    "printf '%s\\n' \"$@\" >> \"$ADMIN_TEST_CLAUDE_ARGS\"",
     "prompt=$(cat)",
     "case \"$prompt\" in *badexit*) echo '{\"type\":\"result\",\"is_error\":true,\"result\":\"You have hit your limit\"}'; exit 1;; esac",
-    "case \"$prompt\" in *css*) echo '/* stub */' >> www/style.css;; esac",
+    "case \"$prompt\" in *css*) echo '/* stub */' >> \"$ADMIN_TEST_APP_ROOT\"/www/style.css;; esac",
     "echo '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{\"file_path\":\"www/style.css\"}}]}}'",
     "echo '{\"type\":\"result\",\"result\":\"done: css please\",\"usage\":{\"input_tokens\":12,\"output_tokens\":3}}'"),stub)
   Sys.chmod(stub,"0755")
   old_path <- Sys.getenv("PATH"); on.exit(Sys.setenv(PATH=old_path),add=TRUE)
-  Sys.setenv(PATH=paste(bin,old_path,sep=.Platform$path.sep))
+  claude_args<-file.path(base,"claude-args.log")
+  Sys.setenv(PATH=paste(bin,old_path,sep=.Platform$path.sep),ADMIN_TEST_APP_ROOT=app,ADMIN_TEST_CLAUDE_ARGS=claude_args)
   expect_identical(unname(Sys.which("claude")),stub)
   expect_true(admin_cli_status("claude_cli")$logged_in)
-  A <- create_app(app,project,18888L,"api-test-token",list(provider="claude_cli",cli_use_login=TRUE,model=""))
+  A <- create_app(app,project,18888L,"api-test-token",list(provider="claude_cli",cli_use_login=TRUE,model="",admin_agent_enabled=TRUE))
   body <- function(path,method="POST",data=list()) handle_api(A,admin_body_req(data),path,method,list())
-  chat <- admin_wait_api(body("/api/admin/chat",data=list(provider="claude",message="css please")))
+  expect_true(from_json(body("/api/admin/enabled","GET")$body)$enabled)
+  expect_equal(body("/api/state","GET")$status,200L) # establish app-owned catalog state before snapshotting
+  pending_chat <- body("/api/admin/chat",data=list(provider="claude",message="css please"))
+  expect_true(length(A$jobs)>0L)
+  expect_true(any(vapply(A$jobs,function(j)identical(j$kind,"app-admin"),TRUE)))
+  chat <- admin_wait_api(pending_chat)
   expect_equal(chat$status,200L,info=if(!is.null(chat$body))paste(from_json(chat$body)$error %||% "",collapse=" ") else "no response body")
   first_turn <- tail(A$admin_session$turns,1L)[[1L]]
   expect_equal(chat$status,200L)
   expect_true("app/www/style.css" %in% unlist(first_turn$changed_files))
   expect_false("project/.dualdag/state/state.json" %in% unlist(first_turn$changed_files))
   expect_true(grepl("done: css please",first_turn$text,fixed=TRUE))
+  turn_history<-readLines(file.path(project,".dualdag","admin_log.jsonl"))
 
   # A real state poll rewrites state.json's volatile timestamp as part of normal app activity.
   expect_equal(body("/api/state","GET")$status,200L)
@@ -143,6 +163,8 @@ test_that("handle_api records only CLI changes, refuses newer files without muta
   undone <- body("/api/admin/undo")
   expect_equal(undone$status,200L,info=if(!is.null(undone$body))paste(from_json(undone$body)$error %||% "",collapse=" ")else "no body")
   expect_identical(readLines(css_path),"base css")
+  expect_identical(readLines(file.path(project,".dualdag","admin_log.jsonl"))[1],turn_history)
+  expect_length(readLines(file.path(project,".dualdag","admin_log.jsonl")),length(turn_history)+1L)
   second <- from_json(body("/api/admin/undo")$body)
   expect_false(second$ok); expect_identical(second$message,"Nothing to undo.")
 
@@ -150,8 +172,80 @@ test_that("handle_api records only CLI changes, refuses newer files without muta
   failure_turn <- tail(A$admin_session$turns,1L)[[1L]]
   expect_equal(failed$status,502L)
   expect_match(failure_turn$text,"You have hit your limit")
+  expect_true("--resume" %in% readLines(claude_args))
   expect_match(from_json(failed$body)$error,"You have hit your limit")
   expect_false("project/.dualdag/state/state.json" %in% unlist(failure_turn$changed_files))
+  expect_true(file.exists(file.path(project,".dualdag","admin_log.jsonl")))
+  expect_length(from_json(body("/api/admin/history","GET")$body)$turns, length(A$admin_session$turns))
+  expect_gt(length(from_json(body("/api/admin/snapshots","GET")$body)$snapshots),0L)
+  disabled <- body("/api/admin/enabled",data=list(enabled=FALSE))
+  expect_false(from_json(disabled$body)$enabled)
+  expect_equal(body("/api/admin/chat",data=list(provider="claude",message="blocked"))$status,403L)
+  expect_equal(body("/api/admin/chat",data=list(provider="openai",message="api"))$status,403L)
+  expect_true(from_json(body("/api/admin/enabled",data=list(enabled=TRUE))$body)$enabled)
+  api_only <- body("/api/admin/chat",data=list(provider="openai",message="api"))
+  expect_equal(api_only$status,400L)
+  expect_match(from_json(api_only$body)$error,"Configure an API key")
+})
+
+test_that("App Admin initializes customer memory, tolerates missing product memory, and retains ten snapshots", {
+  f<-admin_fixture(); on.exit(unlink(f$base,recursive=TRUE),add=TRUE)
+  product_memory<-file.path(f$app,"agent-memory")
+  expect_false(dir.exists(product_memory))
+  prompt<-admin_system_prompt(f$app,f$project)
+  memory_index<-file.path(admin_memory_dir(),"MEMORY.md")
+  expect_true(file.exists(memory_index)); expect_match(prompt,"not present; proceed without product memory")
+  expect_match(prompt,"customer memory folder"); expect_match(prompt,"Never write to product memory")
+  expect_match(prompt,"one fact per file")
+  for(i in seq_len(12)) { writeLines(paste("snapshot",i),file.path(f$project,"spec","variable.csv")); admin_snapshot(f$app,f$project) }
+  snaps<-admin_valid_snapshots(f$project)
+  expect_length(snaps,10L)
+  expect_false(any(grepl("agent-memory",unlist(read_json(file.path(tail(snaps,1),"manifest.json"))$snapshot_files))))
+})
+
+test_that("selected snapshot restoration is undoable and preserves symlinks and excluded data", {
+  skip_on_os("windows")
+  f<-admin_fixture(); on.exit(unlink(f$base,recursive=TRUE),add=TRUE)
+  other<-file.path(f$base,"outside.txt");writeLines("outside remains",other)
+  link<-file.path(f$project,"spec","linked.txt");expect_true(file.symlink(other,link))
+  writeLines("v1",file.path(f$project,"spec","note.txt")); first<-admin_snapshot(f$app,f$project)
+  first_manifest<-read_json(file.path(admin_snapshot_root(f$project),first,"manifest.json"))
+  expect_false("project/spec/linked.txt" %in% unlist(first_manifest$snapshot_files))
+  expect_identical(first_manifest$manifest[["project/spec/linked.txt"]],paste0("symlink:",other))
+  writeLines("v2",file.path(f$project,"spec","note.txt")); admin_snapshot(f$app,f$project)
+  writeLines("v3",file.path(f$project,"spec","note.txt"))
+  unlink(link)
+  A<-create_app(f$app,f$project,18889L,"restore-token",config_defaults())
+  restore<-function(id)handle_api(A,admin_body_req(list(snapshot_id=id)),"/api/admin/restore","POST",list())
+  done<-from_json(restore(first)$body)
+  expect_true(done$ok); expect_identical(readLines(file.path(f$project,"spec","note.txt")),"v1")
+  expect_true(file.exists(link)); expect_identical(readLines(other),"outside remains")
+  undone<-restore(done$undo_snapshot_id)
+  expect_true(from_json(undone$body)$ok);expect_identical(readLines(file.path(f$project,"spec","note.txt")),"v3")
+
+  dir.create(file.path(f$project,"data"),showWarnings=FALSE)
+  payload<-file.path(f$project,"data","payload.csv");writeLines("before",payload)
+  sparse<-file(file.path(f$project,"data","large.bin"),"wb");seek(sparse,where=501*1024^2,origin="start");writeBin(as.raw(0),sparse);close(sparse)
+  big<-admin_snapshot(f$app,f$project)
+  meta<-read_json(file.path(admin_snapshot_root(f$project),big,"manifest.json"))
+  expect_true(meta$data_excluded)
+  expect_false("project/data/payload.csv" %in% unlist(meta$snapshot_files))
+  expect_true(startsWith(meta$manifest[["project/data/payload.csv"]],"hash-only:"))
+  writeLines("changed data is preserved",payload)
+  admin_restore_snapshot(f$app,f$project,big)
+  expect_identical(readLines(payload),"changed data is preserved")
+})
+
+test_that("API provider requires a configured key and enable defaults off", {
+  f<-admin_fixture(); on.exit(unlink(f$base,recursive=TRUE),add=TRUE)
+  expect_false(config_defaults()$admin_agent_enabled)
+  A<-new.env(parent=emptyenv()); A$cfg<-config_defaults(); A$project<-list(dir=f$project); A$jobs<-list(); A$admin_active<-FALSE; A$batch<-NULL
+  body<-admin_body_req(list(provider="openai",message="hello"))
+  disabled<-handle_api(A,body,"/api/admin/chat","POST",list())
+  expect_equal(disabled$status,403L)
+  A$cfg$admin_agent_enabled<-TRUE
+  api<-handle_api(A,body,"/api/admin/chat","POST",list())
+  expect_equal(api$status,400L); expect_match(from_json(api$body)$error,"Configure an API key")
 })
 
 test_that("Stopped-turn after manifest supports Undo and launcher recovery preserves App Admin storage twice", {
@@ -172,14 +266,16 @@ test_that("Stopped-turn after manifest supports Undo and launcher recovery prese
   expect_identical(readLines(file.path(f$app,"R","boot.R")),"code v1")
   expect_false(file.exists(file.path(f$app,"R","new.R")))
   expect_true(file.exists(file.path(admin_snapshot_root(f$project),id2,"manifest.json")))
-  expect_identical(readLines(admin_session_path(f$project)),"private session")
-  expect_identical(readLines(file.path(f$project,".dualdag","runs","keep.log")),"routine output")
+  expect_false(file.exists(admin_session_path(f$project)))
+  expect_false(file.exists(file.path(f$project,".dualdag","runs","keep.log")))
   expect_silent(admin_restore_snapshot(f$app,f$project))
   expect_true(file.exists(file.path(admin_snapshot_root(f$project),id2,"manifest.json")))
 })
 
 test_that("launcher recovery runs outside a broken App Admin module", {
   f <- admin_fixture(); on.exit(unlink(f$base,recursive=TRUE),add=TRUE)
+  outside<-file.path(f$base,"outside.txt");writeLines("safe target",outside)
+  recovery_link<-file.path(f$project,"spec","recovery-link.txt");expect_true(file.symlink(outside,recovery_link))
   file.copy(file.path(app_admin_test_root,"run.R"),file.path(f$app,"run.R"),overwrite=TRUE)
   file.copy(file.path(app_admin_test_root,"R","server.R"),file.path(f$app,"R","server.R"))
   file.copy(file.path(app_admin_test_root,"R","deps.R"),file.path(f$app,"R","deps.R"))
@@ -189,6 +285,7 @@ test_that("launcher recovery runs outside a broken App Admin module", {
   legacy$snapshot_files <- NULL
   write_json(legacy,file.path(admin_snapshot_root(f$project),id,"manifest.json"))
   writeLines("this is not valid R !!!",file.path(f$app,"R","admin.R"))
+  unlink(recovery_link)
   dir.create(file.path(f$project,".dualdag","runs"),recursive=TRUE)
   writeLines("session stays",admin_session_path(f$project))
   writeLines("routine output stays",file.path(f$project,".dualdag","runs","keep.log"))
@@ -198,12 +295,13 @@ test_that("launcher recovery runs outside a broken App Admin module", {
     timeout=60,error_on_status=FALSE,encoding="UTF-8")
   expect_identical(as.integer(invocation$status),0L,info=paste(c(invocation$stdout,invocation$stderr),collapse="\n"))
   expect_identical(readLines(file.path(f$app,"R","admin.R")),readLines(file.path(app_admin_test_root,"R","admin.R")))
-  expect_identical(readLines(admin_session_path(f$project)),"session stays")
-  expect_identical(readLines(file.path(f$project,".dualdag","runs","keep.log")),"routine output stays")
+  expect_true(file.exists(recovery_link));expect_identical(readLines(outside),"safe target")
+  expect_false(file.exists(admin_session_path(f$project)))
+  expect_false(file.exists(file.path(f$project,".dualdag","runs","keep.log")))
   expect_true(file.exists(file.path(admin_snapshot_root(f$project),id,"manifest.json")))
 })
 
-test_that("fake Claude and Codex CLIs get full-turn arguments, safe environment, and Codex sandbox fallback", {
+test_that("fake Claude and Codex CLIs get full-access flags, file-backed instructions, and safe environment", {
   skip_on_os("windows")
   f <- admin_fixture(); on.exit(unlink(f$base, recursive=TRUE), add=TRUE)
   bin <- file.path(f$base,"bin"); dir.create(bin,recursive=TRUE); log <- file.path(f$base,"cli.log")
@@ -211,7 +309,7 @@ test_that("fake Claude and Codex CLIs get full-turn arguments, safe environment,
   writeLines(c("#!/bin/sh", "printf '%s\\n' \"$@\" > \"$ADMIN_TEST_LOG\"", "printf '%s\\n' \"${ANTHROPIC_API_KEY-unset}|${CLAUDE_CODE_OAUTH_TOKEN-unset}\" >> \"$ADMIN_TEST_LOG\"", "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{\"file_path\":\"R/boot.R\"}}]}}' '{\"type\":\"result\",\"result\":\"claude reply\",\"model\":\"stub-model\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}'"), claude)
   Sys.chmod(claude,"0755")
   codex <- file.path(bin,"codex")
-  writeLines(c("#!/bin/sh", "printf '%s\\n' \"$@\" >> \"$ADMIN_TEST_LOG\"", "printf '%s\\n' \"${OPENAI_API_KEY-unset}|${CODEX_API_KEY-unset}\" >> \"$ADMIN_TEST_LOG\"", "count=0; [ ! -f \"$ADMIN_TEST_COUNT\" ] || count=$(cat \"$ADMIN_TEST_COUNT\")", "count=$((count+1)); echo $count > \"$ADMIN_TEST_COUNT\"", "if [ $count -eq 1 ]; then echo 'Failed to start sandbox' >&2; exit 1; fi", "while [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ]; then printf 'codex reply' > \"$2\"; shift 2; else shift; fi; done", "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"stub-thread\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"echo safe\"}}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"file_change\",\"changes\":[{\"kind\":\"update\",\"path\":\"R/boot.R\"}]}}'"), codex)
+  writeLines(c("#!/bin/sh", "printf '%s\\n' \"$@\" >> \"$ADMIN_TEST_LOG\"", "printf '%s\\n' \"${OPENAI_API_KEY-unset}|${CODEX_API_KEY-unset}\" >> \"$ADMIN_TEST_LOG\"", "for arg in \"$@\"; do case \"$arg\" in developer_instructions=*) sys=$(printf '%s\\n' \"$arg\" | sed -n \"s/.* '\\([^']*system-prompt.txt\\)'.*/\\1/p\"); if grep -q 'system boundary' \"$sys\"; then echo SYSTEM_FILE_OK >> \"$ADMIN_TEST_LOG\"; fi;; esac; done", "while [ $# -gt 0 ]; do if [ \"$1\" = --output-last-message ] || [ \"$1\" = -o ]; then printf 'codex reply' > \"$2\"; shift 2; else shift; fi; done", "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"stub-thread\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"echo safe\"}}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"file_change\",\"changes\":[{\"kind\":\"update\",\"path\":\"R/boot.R\"}]}}'"), codex)
   Sys.chmod(codex,"0755")
   old_path <- Sys.getenv("PATH"); old_log <- Sys.getenv("ADMIN_TEST_LOG",unset=NA_character_)
   old_key <- Sys.getenv("ANTHROPIC_API_KEY",unset=NA_character_); old_oauth <- Sys.getenv("CLAUDE_CODE_OAUTH_TOKEN",unset=NA_character_)
@@ -241,10 +339,40 @@ test_that("fake Claude and Codex CLIs get full-turn arguments, safe environment,
   codex_log <- paste(readLines(log),collapse="\n")
   expect_match(codex_log,"unset\\|unset")
   expect_false(any(grepl("fake-openai-key|fake-codex-key",readLines(log))))
-  expect_match(codex_log,"--sandbox"); expect_match(codex_log,"workspace-write")
   expect_match(codex_log,"--dangerously-bypass-approvals-and-sandbox")
+  expect_match(codex_log,"system-prompt[.]txt")
+  expect_false(grepl("system boundary",codex_log,fixed=TRUE))
+  expect_match(codex_log,"SYSTEM_FILE_OK")
+  cx_resume<-admin_cli_turn(f$app,f$project,"codex","stub prompt","system boundary",cx$session_id)
+  expect_identical(cx_resume$session_id,"stub-thread")
+  expect_match(paste(readLines(log),collapse="\n"),"exec\\nresume")
   expect_false(grepl("bwrap|bubblewrap",paste(deparse(body(admin_cli_turn)),collapse=" "),ignore.case=TRUE))
   expect_false(grepl("bwrap|bubblewrap",paste(unlist(dualdag_required_packages()),collapse=" "),ignore.case=TRUE))
+})
+
+test_that("Grok CLI uses a file-backed system profile, full-access headless flags, and resumes sessions", {
+  skip_on_os("windows")
+  f<-admin_fixture();on.exit(unlink(f$base,recursive=TRUE),add=TRUE)
+  bin<-file.path(f$base,"bin");dir.create(bin);log<-file.path(f$base,"grok.log")
+  grok<-file.path(bin,"grok")
+  writeLines(c("#!/bin/sh","if [ \"$1\" = --version ]; then echo 'Grok Build stub'; exit 0; fi",
+    "printf '%s\\n' \"$@\" >> \"$ADMIN_TEST_GROK_LOG\"","profile=''","prompt=''","prev=''",
+    "while [ $# -gt 0 ]; do case \"$1\" in --agent-profile) profile=$2; shift 2;; --prompt-file) prompt=$2; shift 2;; --resume) prev=$2; shift 2;; *) shift;; esac; done",
+    "grep -q 'system boundary' \"$profile\" || exit 9","grep -q 'stub prompt' \"$prompt\" || exit 10",
+    "if [ -n \"$prev\" ]; then echo '{\"text\":\"grok resumed\",\"sessionId\":\"grok-session\"}'; else echo '{\"text\":\"grok reply\",\"sessionId\":\"grok-session\"}'; fi"),grok)
+  Sys.chmod(grok,"0755");old_path<-Sys.getenv("PATH");old_log<-Sys.getenv("ADMIN_TEST_GROK_LOG",unset=NA_character_)
+  on.exit({Sys.setenv(PATH=old_path);if(is.na(old_log))Sys.unsetenv("ADMIN_TEST_GROK_LOG")else Sys.setenv(ADMIN_TEST_GROK_LOG=old_log)},add=TRUE)
+  Sys.setenv(PATH=paste(bin,old_path,sep=.Platform$path.sep),ADMIN_TEST_GROK_LOG=log)
+  expect_true(admin_cli_status("grok_cli")$installed)
+  first<-admin_cli_turn(f$app,f$project,"grok","stub prompt","system boundary","")
+  expect_identical(first$reply,"grok reply");expect_identical(first$session_id,"grok-session")
+  second<-admin_cli_turn(f$app,f$project,"grok","stub prompt","system boundary",first$session_id)
+  expect_identical(second$reply,"grok resumed")
+  cli_args<-paste(readLines(log),collapse="\n")
+  expect_match(cli_args,"--prompt-file");expect_match(cli_args,"--agent-profile")
+  expect_match(cli_args,"--permission-mode");expect_match(cli_args,"bypassPermissions")
+  expect_match(cli_args,"--always-approve");expect_match(cli_args,"--resume")
+  expect_false(grepl("system boundary",cli_args,fixed=TRUE))
 })
 
 test_that("CLI JSON errors and stderr are surfaced as readable turn failures", {
@@ -267,7 +395,7 @@ test_that("Stop kills only the tracked CLI process tree and active work excludes
   expect_false(p$is_alive()); expect_true(unrelated$is_alive())
 
   f <- admin_fixture(); on.exit(unlink(f$base,recursive=TRUE),add=TRUE)
-  A$project <- list(dir=f$project); A$admin_active <- TRUE; A$jobs <- list(); A$batch <- NULL
+  A$project <- list(dir=f$project); A$cfg<-list(admin_agent_enabled=TRUE); A$admin_active <- TRUE; A$jobs <- list(); A$batch <- NULL
   response <- handle_api(A,list(),"/api/fullrun/run","POST",list())
   expect_equal(response$status,409L)
   A$admin_active <- FALSE; A$jobs <- list(list(kind="fullrun"))

@@ -221,8 +221,6 @@ side_system_prompt <- function(side, spec = NULL, dataset = NULL, packages = NUL
   if (!is.null(nr) && identical(nr$kind,"records")) {
     if (!is.null(nr$paramcd) && exists("layer_key_names",mode="function")) {
       key_names <- layer_key_names(spec,ds,nr$paramcd,graph,project)
-    } else if (!is.null(project) && exists("layer_keys_path",mode="function") && file.exists(layer_keys_path(project,ds))) {
-      key_names <- layer_key_names(spec,ds,"*",graph,project)
     }
   }
   keys_step <- !is.null(nr) && side_is_keys_step(nr,key_names)
@@ -339,7 +337,6 @@ side_generation_system_prompt <- function(side, spec, graph, node, project = NUL
   if (identical(node$kind, "records")) {
     keys <- spec_key_names(spec, ds)
     if (isTRUE(graph$layered) && !is.null(node$paramcd)) keys <- layer_key_names(spec, ds, node$paramcd, graph, project)
-    if (!isTRUE(graph$layered) && !is.null(project) && exists("layer_keys_path", mode="function") && file.exists(layer_keys_path(project,ds))) keys <- layer_key_names(spec,ds,"*",graph,project)
     wording <- if (isTRUE(graph$layered)) "This is the Keys step for one parameter layer. Return these key columns and PARAMCD, with one row per record; do not return analysis variables." else "This is the dataset Keys step. Return exactly these compound key columns, one row per record, and no other columns."
     system <- paste(system, wording, paste0("Key columns: ", paste(keys, collapse=", "), "."), sep="\n")
     system <- gsub("Records", "Keys", system, fixed=TRUE)
@@ -403,7 +400,6 @@ side_user_prompt <- function(side, spec, graph, node, upstream_vars,
   ds <- graph$dataset %||% parse_node_id(node$id)$dataset
   keys <- spec_key_names(spec, ds)
   if (isTRUE(graph$layered) && !is.null(node$paramcd)) keys <- layer_key_names(spec, ds, node$paramcd, graph, project)
-  if (!isTRUE(graph$layered) && !is.null(project) && exists("layer_keys_path",mode="function") && file.exists(layer_keys_path(project,ds))) keys <- layer_key_names(spec,ds,"*",graph,project)
   if (isTRUE(graph$layered) && identical(node$kind,"dataset_variable")) keys <- "USUBJID"
   pkg_block <- r_packages_prompt(side_r_packages(project, side))
   ups <- flat_chr(upstream_vars)
@@ -641,13 +637,7 @@ spec_param_row_text <- function(spec, dataset, paramcd) {
 }
 
 spec_key_names <- function(spec, dataset) {
-  v <- spec_vars(spec, dataset)
-  if (!nrow(v) || is.null(v$Key)) return(character())
-  k <- suppressWarnings(as.integer(v$Key))
-  v <- v[!is.na(k), , drop = FALSE]
-  if (!nrow(v)) return(character())
-  k <- suppressWarnings(as.integer(v$Key))
-  v$Variable[order(k)]
+  key_names(spec, dataset)
 }
 
 generate_side <- function(cfg, side, spec, graph, node, upstream_vars,
@@ -1167,7 +1157,6 @@ assemble_work <- function(project, dataset, side, spec = NULL, graph = NULL, exc
   side <- match.arg(side, c("primary", "validation"))
   if (is.null(spec)) spec <- load_project_spec(project)
   keys <- if (is.null(spec)) character() else spec_key_names(spec, dataset)
-  if(!is.null(spec) && exists("layer_keys_path",mode="function") && file.exists(layer_keys_path(project,dataset))) keys <- layer_key_names(spec,dataset,"*",graph,project)
   nodes <- states %||% state_nodes(project, dataset)
   key_ids <- if (length(keys)) paste0(dataset, ".", keys) else character()
   if (!is.null(exclude_id)) exclude_id <- as.character(exclude_id)[1]
@@ -1789,8 +1778,6 @@ start_side_proc <- function(project, dataset, node, side, code, graph, spec) {
   keys <- spec_key_names(spec, dataset)
   ni_for_keys <- node_record(node)
   if (isTRUE(graph$layered) && !is.null(ni_for_keys$paramcd)) keys <- layer_key_names(spec,dataset,ni_for_keys$paramcd,graph,project)
-  if (!isTRUE(graph$layered) && exists("layer_keys_path",mode="function") && file.exists(layer_keys_path(project,dataset))) keys <- layer_key_names(spec,dataset,"*",graph,project)
-  if (!isTRUE(graph$layered) && identical(ni_for_keys$kind,"records")) keys <- unique(flat_chr(graph$key_vars %||% keys))
   prep <- list(
     dir = dir,
     log_path = file.path(dir, "log.txt"),
@@ -1932,7 +1919,6 @@ run_side <- function(project, dataset, node, side, code, timeout = 120,
     df <- tryCatch(readRDS(result$out_path), error=function(e) NULL)
     keys <- spec_key_names(spec %||% load_project_spec(project), dataset)
     if(isTRUE(graph$layered)&&!is.null(node_info$paramcd)) keys <- layer_key_names(spec %||% load_project_spec(project),dataset,node_info$paramcd,graph,project)
-    if(!isTRUE(graph$layered)&&exists("layer_keys_path",mode="function")&&file.exists(layer_keys_path(project,dataset)))keys<-layer_key_names(spec %||% load_project_spec(project),dataset,"*",graph,project)
     required<-keys
     problem <- if (!is.data.frame(df) || !all(required %in% names(df))) paste0("Records result must contain key columns: ",paste(required,collapse=", "),".") else NULL
     if(is.null(problem) && !is.null(node_info$paramcd)) {
@@ -1982,7 +1968,6 @@ run_sides <- function(project, dataset, node, codes, timeout = 120,
     if (!is.null(graph) && isTRUE(out[[side]]$ok) && identical(ni$kind, "records")) {
       df <- tryCatch(readRDS(out[[side]]$out_path), error=function(e) NULL); keys <- spec_key_names(spec, dataset)
       if(isTRUE(graph$layered)&&!is.null(ni$paramcd)) keys <- layer_key_names(spec,dataset,ni$paramcd,graph,project)
-      if(!isTRUE(graph$layered)&&exists("layer_keys_path",mode="function")&&file.exists(layer_keys_path(project,dataset)))keys<-layer_key_names(spec,dataset,"*",graph,project)
       required<-keys
       problem <- if (!is.data.frame(df) || !all(required %in% names(df))) paste0("Records result must contain key columns: ",paste(required,collapse=", "),".") else NULL
       if (is.null(problem) && !is.null(ni$paramcd)) {

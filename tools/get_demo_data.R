@@ -33,8 +33,8 @@ demo_ensure_packages <- function(packages) {
   if (length(still_missing)) stop("Could not install required package(s): ", paste(still_missing, collapse = ", "), call. = FALSE)
 }
 
-get_demo_data <- function(dataset = c("adsl", "advs", "all"), root = demo_fetch_root()) {
-  dataset <- match.arg(tolower(dataset), c("adsl", "advs", "all"))
+get_demo_data <- function(dataset = c("adsl", "advs", "adppk", "all"), root = demo_fetch_root()) {
+  dataset <- match.arg(tolower(dataset), c("adsl", "advs", "adppk", "all"))
   demo_ensure_packages(c("pharmaversesdtm", "haven"))
   version <- as.character(utils::packageVersion("pharmaversesdtm"))
   if (!identical(version, "1.5.0")) {
@@ -43,20 +43,35 @@ get_demo_data <- function(dataset = c("adsl", "advs", "all"), root = demo_fetch_
 
   source(file.path(root, "tools", "adapt_to_pharmaverse.R"), local = environment())
   source(file.path(root, "tools", "pharmaverse_demo_ref.R"), local = environment())
-  sets <- if (dataset == "all") c("adsl", "advs") else dataset
+  sets <- if (dataset == "all") c("adsl", "advs", "adppk") else dataset
   adsl_domains <- c("dm", "suppdm", "ex", "ds", "ae", "vs", "lb", "sv", "cm", "mh")
   for (ds in sets) {
     data_dir <- file.path(root, "demos", ds, "data")
     dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
     if (ds == "adsl") {
       export_pharmaversesdtm(data_dir, domains = adsl_domains)
-    } else {
+    } else if (ds == "advs") {
       build_input <- tempfile("dualdag-advs-input-")
       dir.create(build_input)
       on.exit(unlink(build_input, recursive = TRUE), add = TRUE)
       export_pharmaversesdtm(build_input, domains = adsl_domains)
       file.copy(file.path(build_input, "vs.xpt"), file.path(data_dir, "vs.xpt"), overwrite = TRUE)
       demo_ensure_packages("dplyr")
+      build_pharmaverse_demo_adsl(
+        dir = build_input,
+        spec_dir = file.path(root, "demos", "adsl", "spec"),
+        out_dir = data_dir
+      )
+      unlink(build_input, recursive = TRUE)
+    } else {
+      build_input <- tempfile("dualdag-adppk-input-")
+      dir.create(build_input)
+      on.exit(unlink(build_input, recursive = TRUE), add = TRUE)
+      export_pharmaversesdtm(build_input, domains = unique(c(adsl_domains, "pc")))
+      for (domain in c("ex", "pc", "vs", "lb")) {
+        file.copy(file.path(build_input, paste0(domain, ".xpt")),
+                  file.path(data_dir, paste0(domain, ".xpt")), overwrite = TRUE)
+      }
       build_pharmaverse_demo_adsl(
         dir = build_input,
         spec_dir = file.path(root, "demos", "adsl", "spec"),

@@ -398,8 +398,8 @@ dag_system_prompt <- function(dataset, parameter_graph=FALSE) {
     if(isTRUE(parameter_graph)) "An edge goes from the parameter needed to the parameter that depends on it." else "An edge goes from the upstream variable to the variable that depends on it.",
     "Return JSON only:",
     '{"answer":"short markdown","changes":[],"correction":null}',
-    if(isTRUE(parameter_graph)) "On this Parameter DAG, node ids are PARAMCDs. Use add_edge/remove_edge {from,to,uses:[{from_var,to_var}],evidence}, add_use/remove_use {from,to,from_var,to_var}, add_undefined/remove_undefined {code}, and edit_spec. Changes apply immediately after validation. If unclear, ask a question and return no changes."
-    else "On this Variable DAG, changes apply immediately after validation. Changes may contain add_edge {from,to,evidence}, remove_edge {from,to}, set_layer_keys {paramcd,keys,reason}, or edit_spec {file,dataset,key,column,value}. For variable.csv key is Variable; for parameter.csv key is PARAMCD. Allowed columns: Label, Type, Length, Key, Source, Derivation, PARAM. Existing rows only; never change Dataset, Variable, or PARAMCD. When changing Source, also propose the matching edge change. If unclear, ask a question and return no changes.",
+    if(isTRUE(parameter_graph)) "On this Parameter DAG, node ids are PARAMCDs. Use add_edge/remove_edge {from,to,uses:[{from_var,to_var}],evidence}, add_use/remove_use {from,to,from_var,to_var}, add_undefined/remove_undefined {code}, and edit_spec. Keys are dataset-wide and come only from variable.csv Key; never edit keys per parameter. Changes apply immediately after validation. If unclear, ask a question and return no changes."
+    else paste0("On this Variable DAG, changes apply immediately after validation. Each change must use exactly this JSON shape: {\"op\":\"add_edge\",\"from\":\"ADSL.A\",\"to\":\"ADSL.B\",\"evidence\":\"reason\"}; {\"op\":\"remove_edge\",\"from\":\"ADSL.A\",\"to\":\"ADSL.B\"}; {\"op\":\"edit_spec\",\"file\":\"variable.csv\",\"dataset\":\"ADSL\",\"key\":\"AGE\",\"column\":\"Key\",\"value\":\"1\"}. Keys are dataset-wide and come only from variable.csv Key; edit that column (positive integers, blank means not a key). Never change keys per parameter. For variable.csv key is Variable; for parameter.csv key is PARAMCD. Allowed columns: Label, Type, Length, Key, Source, Derivation, PARAM. Existing rows only; never change Dataset, Variable, or PARAMCD. When changing Source, also propose the matching edge change. If unclear, ask a question and return no changes."),
     "correction is one sentence learned from the user, or null.",
     "No prose outside the JSON.",
     dag_lookup_rule(),
@@ -461,14 +461,16 @@ dag_user_prompt <- function(p, dataset, spec, graph, mem, message, paramcd=NULL,
   md <- dag_cap(md, 12000L, "… DAG capped. Reply with {\"lookup\":[\"ID\"]} for a node that was cut.")
   msg <- as.character(message %||% "")
   if (nchar(msg) > 4000L) msg <- substr(msg, 1L, 4000L)
-  current_keys <- if (!is.null(paramcd) && exists("layer_key_names",mode="function"))
-    paste(layer_key_names(spec,ds,paramcd,graph,p),collapse=", ") else ""
+  layered <- isTRUE(graph$layered)
+  key_pc <- if (layered) paramcd else "*"
+  current_keys <- if (exists("layer_key_names",mode="function"))
+    paste(layer_key_names(spec,ds,key_pc,graph,p),collapse=", ") else ""
   paste0(
     "DATASET: ", ds, "\n",
     if (!is.null(paramcd)) paste0("PARAMCD_ON_SCREEN: ",toupper(paramcd),"\n") else "",
     if (length(selected)) paste0("SELECTED_NODE_IDS: ",paste(toupper(flat_chr(selected)),collapse=", "),"\n") else "",
     if (nzchar(current_keys)) paste0("CURRENT_LAYER_KEYS: ",current_keys,"\n") else "",
-    if (!is.null(paramcd) || length(selected)) "When the user identifies keys, propose set_layer_keys with the complete key list for the parameter on screen. Add selected variables for 'these are keys'; remove a named variable for 'is not a key'.\n" else "",
+    if (!is.null(paramcd) || length(selected) || !layered) "Keys are dataset-wide and come only from variable.csv Key. For key changes, propose edit_spec changes to the Key column (positive integer sequence; blank clears a key). Never propose per-parameter key sets.\n" else "",
     "You see the DAG file, spec Source and Derivation, user corrections, and this conversation.\n",
     "You do not see code, logs, notes, or results from either side.\n",
     "DAG_BEGIN\n", md, "\nDAG_END\n",
@@ -486,10 +488,23 @@ dag_normalize_changes <- function(x) {
     if (!nrow(x)) return(list())
     return(lapply(seq_len(nrow(x)), function(i) as.list(x[i, , drop = FALSE])))
   }
-  if (!is.list(x)) return(list())
+  invalid <- function(item, why) list(.change_error=why,.change_item=item)
+  if (!is.list(x)) return(list(invalid(x,"change item is not an object")))
   if (!is.null(x$op)) return(list(x))
+  if (!is.null(x$type)) { x$op <- x$type; x$type <- NULL; return(list(x)) }
+  if (length(x)==1L && is.list(x[[1]])) {
+    nm <- names(x)[[1]] %||% ""
+    if (nzchar(nm)) { item <- x[[1]]; item$op <- nm; return(list(item)) }
+  }
   out <- list()
-  for (e in x) if (is.list(e) && !is.null(e$op)) out[[length(out) + 1L]] <- e
+  for (e in x) {
+    if (!is.list(e)) { out[[length(out)+1L]] <- invalid(e,"change item is not an object"); next }
+    op <- e$op %||% e$type
+    if (!is.null(op)) { if(is.null(e$op)) e$op <- e$type; e$type <- NULL; out[[length(out)+1L]] <- e; next }
+    nms <- names(e) %||% character()
+    if (length(nms)==1L && is.list(e[[1]])) { item<-e[[1]]; item$op<-nms[[1]]; out[[length(out)+1L]]<-item }
+    else out[[length(out)+1L]] <- invalid(e,"unrecognized change shape; expected op, type, or a single-key op object")
+  }
   out
 }
 
@@ -651,9 +666,22 @@ apply_dag_changes <- function(p, dataset, changes) {
   if (is.null(graph)) stop("No dependency graph yet.", call. = FALSE)
   changes <- dag_normalize_changes(changes)
   if (!length(changes)) stop("No changes to apply.", call. = FALSE)
-  key_changes <- Filter(function(change)identical(tolower(as.character(change$op %||% "")),"set_layer_keys"),changes)
-  graph_changes <- Filter(function(change)!identical(tolower(as.character(change$op %||% "")),"set_layer_keys"),changes)
+  spec_edits <- Filter(function(ch) identical(tolower(as.character(ch$op %||% "")), "edit_spec"), changes)
+  graph_changes <- Filter(function(ch) !identical(tolower(as.character(ch$op %||% "")), "edit_spec"), changes)
+  if(any(vapply(changes,function(change)identical(tolower(as.character(change$op %||% "")),"set_layer_keys"),TRUE)))
+    stop("Keys are dataset-wide and come from variable.csv Key. Edit that spec column; per-parameter keys are not supported.",call.=FALSE)
+  if (!length(graph_changes) && !length(spec_edits)) stop("No changes to apply.", call. = FALSE)
   undo_before <- NULL
+  built <- if(length(graph_changes)) dag_mutate(graph,dataset,graph_changes) else list(graph=graph,flags=list(),edges=list())
+  transaction_snapshot <- if(length(spec_edits)) dag_snapshot(p,dataset) else NULL
+  transaction_committed <- FALSE
+  if(!is.null(transaction_snapshot)) on.exit({
+    if(!transaction_committed) {
+      try(dag_restore_snapshot(p,dataset,transaction_snapshot),silent=TRUE)
+      unlink(transaction_snapshot,recursive=TRUE)
+    }
+  },add=TRUE)
+  spec_result <- if(length(spec_edits)) dag_edit_specs(p,dataset,spec_edits) else list(edits=list(),reset=0L)
   if (length(graph_changes)) {
     ids <- character()
     for (ch in graph_changes) {
@@ -666,7 +694,6 @@ apply_dag_changes <- function(p, dataset, changes) {
     undo_before <- list(graph = graph, corrections = dag_agent_read(p, dataset)$corrections,
       statuses = lapply(ids, function(id) get_status(p, dataset, id)), ids = ids)
   }
-  built <- if(length(graph_changes))dag_mutate(graph,dataset,graph_changes)else list(graph=graph,flags=list(),edges=list())
   if(length(graph_changes))save_graph(p, built$graph)
   affected <- character()
   by_id <- list()
@@ -674,11 +701,6 @@ apply_dag_changes <- function(p, dataset, changes) {
   for (id in names(by_id)) {
     dag_flag_upstream(p, dataset, id, by_id[[id]])
     affected <- c(affected, id)
-  }
-  key_results <- list()
-  for(change in key_changes) {
-    result <- layer_keys_set(p,dataset,change$paramcd,change$keys,FALSE)
-    key_results[[length(key_results)+1L]] <- result
   }
   if (length(affected)) write_state(p)
   if (length(graph_changes)) {
@@ -700,11 +722,17 @@ apply_dag_changes <- function(p, dataset, changes) {
       dag_agent_write(p, dataset, mem)
     }
   }
+  if(!is.null(transaction_snapshot)) {
+    dag_history_finalize(p,dataset,transaction_snapshot)
+    transaction_committed <- TRUE
+  }
   list(
     ok = TRUE,
     affected = as.list(unique(affected)),
     edges = built$edges,
-    layer_keys = key_results
+    layer_keys = list(),
+    spec_edits = spec_result$edits,
+    reset = spec_result$reset
   )
 }
 
@@ -739,40 +767,60 @@ dag_history_finalize <- function(p,ds,dir) {
   invisible(manifest)
 }
 
-dag_edit_spec <- function(p, ds, edit) {
-  file <- as.character(edit$file %||% "")[1]
+dag_edit_specs <- function(p, ds, edits) {
+  if (!length(edits)) return(list(edits=list(), reset=0L))
+  root <- project_dir_of(p)
+  files <- unique(vapply(edits, function(edit) as.character(edit$file %||% "")[1], ""))
+  tabs <- list(); cols <- list()
+  for (file in files) {
   if (!file %in% c("variable.csv","parameter.csv")) stop("edit_spec file must be variable.csv or parameter.csv.",call.=FALSE)
+  path <- file.path(root,"spec",file); tab <- read_csv_table(path)$df
+  tabs[[file]] <- tab
+  cols[[file]] <- names(tab)
+  }
+  results <- list()
+  for (edit in edits) {
+  file <- as.character(edit$file %||% "")[1]
   key <- if (file=="variable.csv") "Variable" else "PARAMCD"
   column <- as.character(edit$column %||% "")[1]
   allowed <- if(file=="variable.csv") c("Label","Type","Length","Key","Source","Derivation") else c("Label","Type","Length","Key","Source","Derivation","PARAM")
-  if (!column %in% allowed || !column %in% if(file=="variable.csv") .VAR_COLS else .PAR_COLS)
-    stop("Unknown or disallowed column for ",file,": ",column,".",call.=FALSE)
+  if (!column %in% allowed || !column %in% if(file=="variable.csv") .VAR_COLS else .PAR_COLS) stop("Unknown or disallowed column for ",file,": ",column,".",call.=FALSE)
   dataset <- safe_ds(edit$dataset %||% ds); if (!identical(dataset,ds)) stop("edit_spec dataset must match the active dataset.",call.=FALSE)
   row_key <- toupper(trimws(as.character(edit$key %||% "")[1])); if(!nzchar(row_key)) stop("edit_spec key is required.",call.=FALSE)
-  path <- file.path(project_dir_of(p),"spec",file); tab <- read_csv_table(path)$df
-  cols <- names(tab); ix <- which(toupper(trimws(as.character(tab[["Dataset"]])))==dataset & toupper(trimws(as.character(tab[[key]])))==row_key)
+  tab <- tabs[[file]]
+  ix <- which(toupper(trimws(as.character(tab[["Dataset"]])))==dataset & toupper(trimws(as.character(tab[[key]])))==row_key)
   if(length(ix)!=1L) stop("Unknown or ambiguous ",key," row: ",row_key,".",call.=FALSE)
   old_value <- as.character(tab[[column]][ix]); value <- as.character(edit$value %||% "")[1]; if(is.na(value)) value <- ""
   if(column=="Length" && nzchar(trimws(value)) && !grepl("^[1-9][0-9]*$",trimws(value))) stop("Length must be a positive integer or blank.",call.=FALSE)
   if(column=="Key" && nzchar(trimws(value)) && !grepl("^[1-9][0-9]*$",trimws(value))) stop("Key must be a positive integer or blank.",call.=FALSE)
-  tab[[column]][ix] <- value
-  tmp <- tempfile(pattern=".dag-agent-",tmpdir=dirname(path)); on.exit(unlink(tmp),add=TRUE)
-  utils::write.csv(tab[,cols,drop=FALSE],tmp,row.names=FALSE,quote=TRUE,na="",eol="\n")
-  variable_path <- file.path(project_dir_of(p),"spec","variable.csv"); parameter_path <- file.path(project_dir_of(p),"spec","parameter.csv")
+  tab[[column]][ix] <- value; tabs[[file]] <- tab
+  results[[length(results)+1L]] <- list(file=file,key=row_key,column=column,old=old_value,value=value)
+  }
+  staged <- list(); on.exit(unlink(unlist(staged,use.names=FALSE)),add=TRUE)
+  for (file in files) { path <- file.path(root,"spec",file); tmp <- tempfile(pattern=".dag-agent-",tmpdir=dirname(path)); staged[[file]] <- tmp
+    utils::write.csv(tabs[[file]][,cols[[file]],drop=FALSE],tmp,row.names=FALSE,quote=TRUE,na="",eol="\n") }
+  variable_path <- file.path(root,"spec","variable.csv"); parameter_path <- file.path(root,"spec","parameter.csv")
   before <- read_spec(variable_path,if(file.exists(parameter_path))parameter_path else NULL)
-  parsed <- read_spec(if(file=="variable.csv") tmp else variable_path,
-                      if(file=="parameter.csv") tmp else { q<-file.path(project_dir_of(p),"spec","parameter.csv"); if(file.exists(q))q else NULL })
+  vp <- if("variable.csv" %in% files) staged[["variable.csv"]] else variable_path
+  pp <- if("parameter.csv" %in% files) staged[["parameter.csv"]] else if(file.exists(parameter_path)) parameter_path else NULL
+  parsed <- read_spec(vp,pp)
   error_text <- function(x) vapply(Filter(function(z)identical(as.character(z$severity %||% "error"),"error"),x$problems %||% list()),function(z)paste(z$file %||% "",z$message %||% ""),"")
   errors <- setdiff(error_text(parsed),error_text(before))
   if (length(errors)) stop("Edited spec failed validation: ",errors[[1]],call.=FALSE)
+  # Bring any out-of-band edits up to date before measuring this batch's diff.
   if(exists("sync_external",mode="function")) sync_external(p)
   old_hashes <- p$state$row_hash %||% list()
-  if(!file.rename(tmp,path)) stop("Could not replace ",file,".",call.=FALSE)
+  backups <- list(); written <- character()
+  for (file in files) { path <- file.path(root,"spec",file); backup <- tempfile(pattern=".dag-agent-backup-",tmpdir=dirname(path)); if(!file.copy(path,backup,overwrite=TRUE)) stop("Could not back up ",file,".",call.=FALSE); backups[[file]] <- backup }
+  tryCatch({ for(file in files) { path <- file.path(root,"spec",file); if(!file.rename(staged[[file]],path)) stop("Could not replace ",file,".",call.=FALSE); written <- c(written,file) } },error=function(e) { for(file in written) file.copy(backups[[file]],file.path(root,"spec",file),overwrite=TRUE); stop(e) })
   if(exists("sync_external",mode="function")) sync_external(p)
   new_hashes <- p$state$row_hash %||% list()
   affected <- names(old_hashes)[vapply(names(old_hashes),function(id) !identical(old_hashes[[id]],new_hashes[[id]]),TRUE)]
-  list(file=file,key=row_key,column=column,old=old_value,value=value,reset=length(affected))
+  unlink(unlist(backups,use.names=FALSE))
+  list(edits=results,reset=length(affected))
 }
+
+dag_edit_spec <- function(p, ds, edit) dag_edit_specs(p, ds, list(edit))$edits[[1L]]
 
 dag_restore_snapshot <- function(p, ds, dir) {
   current_mem <- tryCatch(dag_agent_read(p,ds),error=function(e)list())
@@ -815,13 +863,16 @@ dag_ask <- function(cfg, project, dataset, message, paramcd=NULL, selected=NULL,
   answer <- trimws(as.character(parsed$answer %||% "")[1])
   if (!nzchar(answer) || is.na(answer)) stop("The model returned an empty answer.", call. = FALSE)
   changes <- dag_normalize_changes(parsed$changes)
-  if(length(changes)) for(i in seq_along(changes)) if(identical(changes[[i]]$op,"set_layer_keys")) {
-    proposed <- layer_keys_set(root,dataset,changes[[i]]$paramcd,changes[[i]]$keys,dry_run=TRUE)
-    before <- layer_key_names(spec,dataset,changes[[i]]$paramcd,graph,root)
-    after <- flat_chr(proposed$keys)
-    changes[[i]]$added <- as.list(setdiff(after,before))
-    changes[[i]]$removed <- as.list(setdiff(before,after))
-    changes[[i]]$reset_count <- proposed$reset_count
+  rejected <- character()
+  if(length(changes)) for(i in seq_along(changes)) {
+    ch <- changes[[i]]
+    if(!is.null(ch$.change_error)) { rejected <- c(rejected,paste0("Change ",json_text(ch$.change_item)," was dropped: ",ch$.change_error,".")); next }
+    op <- tolower(trimws(as.character(ch$op %||% "")[1]))
+    if(!op %in% c("add_edge","remove_edge","set_layer_keys","edit_spec","add_use","remove_use","add_undefined","remove_undefined")) {
+      rejected <- c(rejected,paste0("Change ",json_text(ch)," was rejected: unknown operation '",op,"'.")); next
+    }
+    changes[[i]]$op <- op
+    if(identical(op,"set_layer_keys")) rejected <- c(rejected,"Keys are dataset-wide and come from variable.csv Key. Edit that spec column; per-parameter keys are not supported.")
   }
   correction <- parsed$correction
   if (is.null(correction)) {
@@ -830,16 +881,24 @@ dag_ask <- function(cfg, project, dataset, message, paramcd=NULL, selected=NULL,
     correction <- dag_one_line(correction)
     if (!nzchar(correction) || identical(tolower(correction), "null")) correction <- NULL
   }
-  card <- list(); snap <- NULL; validation_error <- NULL
-  if(length(changes)) {
+  card <- list(); snap <- NULL; validation_error <- NULL; active_change <- NULL
+  if(length(changes) && !length(rejected)) {
     snap <- dag_snapshot(root,dataset)
     tryCatch({
       spec_edits <- Filter(function(ch) identical(tolower(as.character(ch$op %||% "")),"edit_spec"),changes)
       graph_edits <- Filter(function(ch) !identical(tolower(as.character(ch$op %||% "")),"edit_spec"),changes)
-      for(ch in spec_edits) {
-        ed <- dag_edit_spec(edit_project,dataset,ch); card[[length(card)+1L]] <- list(text=paste0(ed$file," ",ed$key," ",ed$column,": ",if(nzchar(ed$old))ed$old else "(blank)"," → ",if(nzchar(ed$value))ed$value else "(blank)"),reset=ed$reset)
+      if(length(spec_edits)) {
+        active_change <- spec_edits[[1L]]
+        batch <- dag_edit_specs(edit_project,dataset,spec_edits)
+        for(ed in batch$edits) card[[length(card)+1L]] <- list(text=paste0(ed$file," ",ed$key," ",ed$column,": ",if(nzchar(ed$old))ed$old else "(blank)"," → ",if(nzchar(ed$value))ed$value else "(blank)"),reset=0L)
+        if(length(card)) card[[1L]]$reset <- batch$reset
       }
       if(length(graph_edits)) {
+        validated_graph <- graph
+        for(ch in graph_edits) {
+          active_change <- ch
+          if(ch$op %in% c("add_edge","remove_edge")) validated_graph <- dag_mutate(validated_graph,dataset,list(ch))$graph
+        }
         specialized_param_ops <- vapply(graph_edits,function(ch) ch$op %in% c("add_use","remove_use","add_undefined","remove_undefined"),TRUE)
         use_param_graph <- isTRUE(parameter_graph) || any(specialized_param_ops)
         param_ops <- vapply(graph_edits,function(ch) ch$op %in% c("add_edge","remove_edge","add_use","remove_use","add_undefined","remove_undefined"),TRUE)
@@ -850,31 +909,22 @@ dag_ask <- function(cfg, project, dataset, message, paramcd=NULL, selected=NULL,
         } else {
           applied <- apply_dag_changes(edit_project,dataset,graph_edits)
           for(ch in graph_edits) if(ch$op %in% c("add_edge","remove_edge")) card[[length(card)+1L]] <- list(text=paste0(if(ch$op=="add_edge")"Added edge " else "Removed edge ",ch$from," → ",ch$to),reset=0L)
-          for(ch in graph_edits) if(ch$op=="set_layer_keys") card[[length(card)+1L]] <- list(text=paste0("Parameter layer keys updated: ",ch$paramcd),reset=as.integer(ch$reset_count %||% 0L))
         }
       }
       new_spec <- read_project_spec(root)
       pg <- if(exists("param_graph_read",mode="function")) param_graph_read(root,dataset) else NULL
       if(!is.null(pg) && !is.null(new_spec)) { pg$spec_hash <- new_spec$hash; pg$stale <- FALSE; param_graph_write(root,pg) }
       dag_history_finalize(root,dataset,snap)
-    }, error=function(e) { validation_error <<- conditionMessage(e); try(dag_restore_snapshot(root,dataset,snap),silent=TRUE); unlink(snap,recursive=TRUE) })
+    }, error=function(e) { validation_error <<- paste0("Change ",json_text(active_change)," was rejected: ",conditionMessage(e)); try(dag_restore_snapshot(root,dataset,snap),silent=TRUE); unlink(snap,recursive=TRUE) })
     for(i in seq_along(card)) {
       if((card[[i]]$reset %||% 0)>0) card[[i]]$text <- paste0(card[[i]]$text," · ",card[[i]]$reset," variables reset")
     }
   }
-  if(!is.null(validation_error)) {
-    refusal_user <- paste0(user,"\n\nVALIDATION_REFUSAL\nThe complete change set was rolled back. Validation said: ",validation_error,
-      "\nExplain this refusal to the user. Return JSON with an answer and an empty changes array.")
-    refusal_raw <- tryCatch(llm_chat(cfg,system,refusal_user,max_tokens=1200L,json=TRUE),error=function(e)NULL)
-    refusal_parsed <- if(is.list(refusal_raw)) tryCatch(parse_json_reply(refusal_raw$text),error=function(e)NULL) else NULL
-    refusal_answer <- trimws(as.character(refusal_parsed$answer %||% "")[1])
-    answer <- if(nzchar(refusal_answer)) refusal_answer else paste0("I couldn't apply that change: ",validation_error)
-    changes <- list(); correction <- NULL; card <- list()
-    if(is.list(refusal_raw)) {
-      usage <- llm_usage_summary(refusal_raw$usage,cfg$provider %||% "")
-      answered$usage <- llm_usage_combine(list(answered$usage,usage))
-      answered$raw$model <- refusal_raw$model %||% answered$raw$model
-    }
+  if(!is.null(validation_error)) rejected <- c(rejected,validation_error)
+  if(length(rejected)) {
+    answer <- paste(c("I couldn't apply the proposed change(s).",rejected),collapse="\n\n")
+    card <- lapply(rejected,function(x)list(text=x,reset=0L))
+    changes <- list(); correction <- NULL
   }
   at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3%z")
   mem$turns <- c(mem$turns, list(
@@ -928,8 +978,10 @@ fake_dag_reply <- function(system, user) {
     picked <- if(nzchar(picked)) strsplit(picked,",\\s*")[[1]] else character()
     picked <- vapply(picked,function(id){parsed<-parse_node_id(id);if(is.null(parsed))"" else parsed$var},"")
     remove <- regmatches(mu,regexec("([A-Z][A-Z0-9_]*)\\s+(?:IS|AS)\\s+NOT\\s+A\\s+KEY",mu,perl=TRUE))[[1]]
-    keys <- if(length(remove)>=2L)setdiff(current,remove[[2]]) else unique(c(current,picked))
-    changes[[1]] <- list(op="set_layer_keys",paramcd=pc,keys=keys,reason=msg)
+    before <- setdiff(current,c("USUBJID","PARAMCD"))
+    after <- if(length(remove)>=2L)setdiff(before,remove[[2]]) else if(length(picked))unique(picked) else before
+    edits <- unique(c(before,after))
+    changes <- lapply(edits,function(variable)list(op="edit_spec",file="variable.csv",dataset=line_value("DATASET"),key=variable,column="Key",value=if(variable%in%after)as.character(match(variable,after))else""))
   }
   m <- regexec("ADD EDGE\\s+([A-Z0-9_.@]+)\\s*(?:->|→)\\s*([A-Z0-9_.@]+)", mu, perl = TRUE)
   r <- regmatches(mu, m)[[1]]

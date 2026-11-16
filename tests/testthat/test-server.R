@@ -186,7 +186,7 @@ test_that("Settings saves the strong model and leaves the Settings model alone",
   expect_identical(load_config()$model, "small")
   expect_identical(load_config()$strong_model, "big")
   call_app(A, "/api/config", "POST", list(strong_model = ""))
-  expect_identical(load_config()$strong_model, "")
+  expect_identical(load_config()$strong_model, "gpt-6.1-terra")
 })
 
 test_that("config save keeps the API key out of config.json and modes the key file 0600", {
@@ -339,7 +339,7 @@ test_that("a live run.R answers curl for / and /api/state", {
   expect_equal(code_of(c("-H", paste0("X-Dualdag-Token: ", token), paste0(base, "api/state"))), "200")
 })
 
-test_that("codex_cli keeps an empty model and cli_use_login defaults to true", {
+test_that("codex_cli fills its low-end default and cli_use_login defaults to true", {
   box <- isolate_home()
   on.exit(box$restore(), add = TRUE)
   writeLines('{"provider":"openai","model":"kept"}', file.path(box$home, "config.json"))
@@ -353,7 +353,7 @@ test_that("codex_cli keeps an empty model and cli_use_login defaults to true", {
   expect_equal(res$status, 200L)
   pub <- resp_json(res)$config
   expect_equal(pub$provider, "codex_cli")
-  expect_equal(pub$model, "")
+  expect_equal(pub$model, "gpt-6-luna")
   expect_true(isTRUE(pub$cli_use_login))
   expect_true(isTRUE(llm_ready(A$cfg)))
   again <- call_app(A, "/api/config", "POST", list(provider = "codex_cli", model = "gpt-5.4"))

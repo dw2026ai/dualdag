@@ -108,6 +108,45 @@ batch_project <- function(two_keys = FALSE) {
   proj
 }
 
+advs_whole_project <- function() {
+  proj <- tempfile("dualdag-advs-whole-")
+  dir.create(file.path(proj, "spec"), recursive = TRUE)
+  dir.create(file.path(proj, "data"), recursive = TRUE)
+  writeLines(c(VAR_HEADER,
+    "ADVS,USUBJID,Subject,Char,20,1,VS.USUBJID,Copy subject.",
+    "ADVS,PARAMCD,Parameter,Char,8,2,VS.VSTESTCD,Copy parameter.",
+    "ADVS,AVAL,Value,Num,8,,VS.VSSTRESN,Copy the collected value."),
+    file.path(proj, "spec", "variable.csv"))
+  writeLines(c("Dataset,PARAMCD,PARAM,Source,Derivation",
+    "ADVS,WEIGHT,Weight,VS.VSTESTCD,Carry-over source rows.",
+    "ADVS,HEIGHT,Height,VS.VSTESTCD,Carry-over source rows.",
+    "ADVS,BMI,Body mass index,ADVS.AVAL@WEIGHT and ADVS.AVAL@HEIGHT,Weight divided by height squared.",
+    "ADVS,OTHER,Other derived layer,ADVS.AVAL@BMI,Copy the prior derived layer."),
+    file.path(proj, "spec", "parameter.csv"))
+  file.copy(file.path(app_root, "tests", "fixtures", "vs.xpt"), file.path(proj, "data", "vs.xpt"))
+  p <- open_project(proj); spec <- read_project_spec(p)
+  g <- graph_skeleton(spec, "ADVS", carry_members = c("WEIGHT", "HEIGHT"))
+  g$generated_parameters <- list("CARRY_OVER", "BMI", "OTHER")
+  g$edges <- list(
+    list(from = "ADVS.RECORDS@CARRY_OVER", to = "ADVS.AVAL@CARRY_OVER", evidence = "records before values", origin = "user"),
+    list(from = "ADVS.RECORDS@BMI", to = "ADVS.AVAL@BMI", evidence = "records before values", origin = "user"),
+    list(from = "ADVS.RECORDS@OTHER", to = "ADVS.AVAL@OTHER", evidence = "records before values", origin = "user"))
+  save_graph(p, g); note_graph_nodes(p, "ADVS", g)
+  pg <- list(dataset = "ADVS", nodes = param_defined_nodes(spec, "ADVS"),
+    carry_members = list("WEIGHT", "HEIGHT"),
+    edges = list(
+      list(from = "WEIGHT", to = "BMI", uses = list(list(from_var = "AVAL", to_var = "AVAL"))),
+      list(from = "HEIGHT", to = "BMI", uses = list(list(from_var = "AVAL", to_var = "AVAL"))),
+      list(from = "BMI", to = "OTHER", uses = list(list(from_var = "AVAL", to_var = "AVAL")))),
+    classification = list(parameters = list(
+      list(paramcd = "WEIGHT", classification = "carry_over"),
+      list(paramcd = "HEIGHT", classification = "carry_over"),
+      list(paramcd = "BMI", classification = "derived"),
+      list(paramcd = "OTHER", classification = "derived"))))
+  param_graph_write(p, pg)
+  proj
+}
+
 test_that("batch order is keys, then topological order, then leftovers", {
   box <- isolate_batch_home()
   on.exit(box$restore(), add = TRUE)
@@ -310,4 +349,148 @@ test_that("cancel stops after the current node and compare can stay off", {
   expect_equal(rows[[1]]$message, "Generated")
   expect_false(file.exists(file.path(node_run_dir(A$project, "ADSL", "ADSL.USUBJID"), "compare.json")))
   expect_equal(get_status(A$project, "ADSL", "ADSL.AGE")$level, "none")
+})
+
+test_that("whole dataset stops on the first failed node and leaves later nodes untouched", {
+  box <- isolate_batch_home(); on.exit(box$restore(), add = TRUE)
+  proj <- batch_project()
+  A <- create_app(app_root, proj, 7987L, "batch-token", load_config())
+  res <- call_app(A, "/api/batch", "POST", list(dataset = "ADSL", whole_dataset = TRUE))
+  expect_equal(res$status, 200L)
+  wait_batch(A, timeout = 240)
+  b <- A$batch
+  expect_true(isTRUE(b$finished))
+  expect_true(isTRUE(b$stop_on_error))
+  expect_equal(b$stopped_at$node, "ADSL.NOPE")
+  expect_match(b$stopped_at$reason, "could not derive", ignore.case = TRUE)
+  expect_equal(row_nodes(b), c("ADSL.USUBJID", "ADSL.NOPE"))
+  expect_false(file.exists(file.path(node_run_dir(A$project, "ADSL", "ADSL.AGE"), "compare.json")))
+  expect_null(b$fullrun)
+})
+
+test_that("whole dataset generates in dependency order then runs both Full Runs", {
+  box <- isolate_batch_home(); on.exit(box$restore(), add = TRUE)
+  proj <- batch_project()
+  p <- open_project(proj)
+  spec <- read_project_spec(p)
+  writeLines(spec_csv(), file.path(proj, "spec", "variable.csv"))
+  # Remove the intentionally failing fixture node and retain a real dependency chain.
+  writeLines(paste(c(VAR_HEADER,
+    "ADSL,USUBJID,Unique Subject,Char,20,1,DM.USUBJID,copy",
+    "ADSL,AGE,Age,Num,8,,DM.AGE,copy",
+    "ADSL,AGE2,Age plus one,Num,8,,,AGE + 1"), collapse = "\n"), file.path(proj, "spec", "variable.csv"))
+  g <- load_graph(p, "ADSL"); g$nodes <- Filter(function(n) n$id != "ADSL.NOPE", g$nodes)
+  g$edges <- list(list(from = "ADSL.AGE", to = "ADSL.AGE2", evidence = "AGE2 = AGE + 1", origin = "user"))
+  save_graph(p, g); note_graph_nodes(p, "ADSL", g)
+  A <- create_app(app_root, proj, 7988L, "batch-token", load_config())
+  res <- call_app(A, "/api/batch", "POST", list(dataset = "ADSL", whole_dataset = TRUE))
+  expect_equal(res$status, 200L)
+  pump_until(function() is.list(A$batch$fullrun) && identical(A$batch$fullrun$status, "running"), timeout = 240)
+  during <- resp_json(call_app(A, "/api/state"))$batch
+  expect_false(isTRUE(during$finished))
+  expect_equal(during$step, "fullrun")
+  expect_true(isTRUE(during$whole_dataset))
+  pump_until(function() isTRUE(A$batch$finished) && !is.null(A$batch$fullrun) && A$batch$fullrun$status != "running", timeout = 300)
+  expect_equal(row_nodes(A$batch), c("ADSL.USUBJID", "ADSL.AGE", "ADSL.AGE2"))
+  expect_true(all(vapply(batch_rows(A$batch), function(r) isTRUE(r$ok), TRUE)))
+  expect_equal(A$batch$fullrun$status, "complete", info = paste(capture.output(str(A$batch$fullrun)), collapse = "\n"))
+  polled <- resp_json(call_app(A, "/api/state"))$batch
+  expect_true(isTRUE(polled$finished))
+  expect_equal(polled$fullrun$status, "complete")
+  expect_true(isTRUE(polled$fullrun$primary$ok))
+  expect_true(isTRUE(polled$fullrun$validation$ok))
+  expect_true(file.exists(file.path(fullrun_dir(A$project, "ADSL", "primary"), "run.json")))
+  expect_true(file.exists(file.path(fullrun_dir(A$project, "ADSL", "validation"), "run.json")))
+})
+
+test_that("whole dataset guard maps generated carry-over identity and selects grouped nodes once", {
+  box <- isolate_batch_home(); on.exit(box$restore(), add = TRUE)
+  proj <- tempfile("wei31-carry-guard-"); dir.create(file.path(proj, "spec"), recursive = TRUE)
+  writeLines(c(VAR_HEADER,
+    "ADVS,USUBJID,Subject,Char,20,1,,",
+    "ADVS,PARAMCD,Parameter,Char,8,2,,",
+    "ADVS,AVAL,Value,Num,8,,,"), file.path(proj, "spec", "variable.csv"))
+  writeLines(c("Dataset,PARAMCD,PARAM,Source,Derivation",
+    "ADVS,WEIGHT,Weight,,", "ADVS,HEIGHT,Height,,", "ADVS,BMI,Body mass index,,"),
+    file.path(proj, "spec", "parameter.csv"))
+  p <- open_project(proj); spec <- read_project_spec(p)
+  g <- graph_skeleton(spec, "ADVS", carry_members = c("WEIGHT", "HEIGHT"))
+  g$generated_parameters <- list("CARRY_OVER")
+  save_graph(p, g); note_graph_nodes(p, "ADVS", g)
+  ids <- dataset_node_ids(p, spec, "ADVS")
+  ordered <- batch_order_for(p, "ADVS", ids)
+  expect_length(ids, length(unique(ids)))
+  expect_length(ordered, length(unique(ordered)))
+  expect_equal(sum(vapply(g$nodes, function(n) identical(n$paramcd, "CARRY_OVER") && n$kind == "records", TRUE)), 1L)
+  expect_true("ADVS.AVAL@CARRY_OVER" %in% ordered)
+  expect_false(any(grepl("@(WEIGHT|HEIGHT)$", ordered)))
+  expect_equal(batch_missing_variable_dags(g, spec, "ADVS"), "BMI")
+  A <- create_app(app_root, proj, 7989L, "batch-token", load_config())
+  res <- call_app(A, "/api/batch", "POST", list(dataset = "ADVS", whole_dataset = TRUE))
+  expect_equal(res$status, 409L)
+  expect_match(resp_json(res)$error, "BMI", fixed = TRUE)
+  expect_false(batch_running(A))
+})
+
+test_that("ADVS whole dataset runs carry-over and derived layers in parameter order then Full Runs both sides", {
+  box <- isolate_batch_home(); on.exit(box$restore(), add = TRUE)
+  proj <- advs_whole_project()
+  A <- create_app(app_root, proj, 7990L, "batch-token", load_config())
+  started <- call_app(A, "/api/batch", "POST", list(dataset = "ADVS", whole_dataset = TRUE))
+  expect_equal(started$status, 200L)
+  expected <- c("ADVS.RECORDS@CARRY_OVER", "ADVS.AVAL@CARRY_OVER",
+    "ADVS.RECORDS@BMI", "ADVS.AVAL@BMI", "ADVS.RECORDS@OTHER", "ADVS.AVAL@OTHER")
+  expect_equal(A$batch$order, expected)
+  pump_until(function() is.list(A$batch$fullrun) && identical(A$batch$fullrun$status, "running"), timeout = 300)
+  during <- resp_json(call_app(A, "/api/state"))$batch
+  expect_false(isTRUE(during$finished))
+  expect_equal(during$step, "fullrun")
+  pump_until(function() isTRUE(A$batch$finished), timeout = 300)
+  expect_equal(row_nodes(A$batch), expected)
+  expect_true(all(vapply(batch_rows(A$batch), function(r) isTRUE(r$ok) && identical(r$level, "L3"), TRUE)),
+    info = paste(capture.output(str(batch_rows(A$batch))), collapse = "\n"))
+  expect_equal(A$batch$fullrun$status, "complete", info = paste(capture.output(str(A$batch$fullrun)), collapse = "\n"))
+  final <- resp_json(call_app(A, "/api/state"))$batch
+  expect_true(isTRUE(final$finished))
+  expect_true(isTRUE(final$fullrun$primary$ok))
+  expect_true(isTRUE(final$fullrun$validation$ok))
+  expect_gt(as.integer(final$fullrun$primary$rows), 0L)
+  expect_gt(as.integer(final$fullrun$validation$rows), 0L)
+  expect_true(file.exists(file.path(fullrun_dir(A$project, "ADVS", "primary"), "result.rds")))
+  expect_true(file.exists(file.path(fullrun_dir(A$project, "ADVS", "validation"), "result.rds")))
+})
+
+test_that("ADVS L2 compare problem in a middle derived layer stops before later layer nodes", {
+  box <- isolate_batch_home(); on.exit(box$restore(), add = TRUE)
+  proj <- advs_whole_project()
+  real_start_compare <- start_compare
+  assign("start_compare", function(A, ds, id) {
+    if (!identical(id, "ADVS.AVAL@BMI")) return(real_start_compare(A, ds, id))
+    st <- get_status(A$project, ds, id)
+    st$level <- "L2"
+    st$problem <- list(stage = "compare", message = "Fake model compare mismatch at ADVS.AVAL@BMI")
+    put_status(A$project, ds, id, st)
+    promises::promise(function(resolve, reject) resolve(json_resp(list(status = st, compare = list(match = FALSE)))))
+  }, envir = .GlobalEnv)
+  on.exit(assign("start_compare", real_start_compare, envir = .GlobalEnv), add = TRUE)
+  A <- create_app(app_root, proj, 7991L, "batch-token", load_config())
+  started <- call_app(A, "/api/batch", "POST", list(dataset = "ADVS", whole_dataset = TRUE))
+  expect_equal(started$status, 200L)
+  wait_batch(A, timeout = 300)
+  expected_prefix <- c("ADVS.RECORDS@CARRY_OVER", "ADVS.AVAL@CARRY_OVER",
+    "ADVS.RECORDS@BMI", "ADVS.AVAL@BMI")
+  expect_equal(row_nodes(A$batch), expected_prefix)
+  expect_equal(A$batch$stopped_at$node, "ADVS.AVAL@BMI")
+  expect_equal(A$batch$stopped_at$reason, "Fake model compare mismatch at ADVS.AVAL@BMI")
+  failed <- tail(batch_rows(A$batch), 1)[[1]]
+  expect_equal(failed$level, "L2")
+  expect_false(isTRUE(failed$ok))
+  expect_true(isTRUE(failed$compare_ok))
+  expect_equal(get_status(A$project, "ADVS", "ADVS.AVAL@BMI")$problem$message,
+    "Fake model compare mismatch at ADVS.AVAL@BMI")
+  for (id in c("ADVS.RECORDS@OTHER", "ADVS.AVAL@OTHER")) {
+    expect_equal(get_status(A$project, "ADVS", id)$level, "none")
+    expect_false(file.exists(file.path(node_run_dir(A$project, "ADVS", id), "compare.json")))
+  }
+  expect_null(A$batch$fullrun)
 })

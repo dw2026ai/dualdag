@@ -17,20 +17,35 @@ config_defaults <- function() {
     timeout_run_s = 600, llm_timeout_s = 180,
     port = 7979L, project = "",
     # TRUE: claude_cli / codex_cli drop API-key env vars so the CLI login is used.
-    cli_use_login = TRUE
+    cli_use_login = TRUE,
+    admin_agent_enabled = FALSE
   )
 }
 
 config_allowed_providers <- function() c("openai", "anthropic", "openai_compatible", "grok_cli", "claude_cli", "codex_cli")
 
-config_default_model <- function(provider) switch(as.character(provider %||% "")[1],
-  grok_cli = "grok-4.7", claude_cli = "claude-sonnet-5-5", "")
+config_model_tiers <- function(provider) {
+  switch(as.character(provider %||% "")[1],
+    claude_cli = list(high = "claude-opus-5-5", low = "claude-sonnet-5-5"),
+    anthropic = list(high = "claude-opus-5-5", low = "claude-sonnet-5-5"),
+    codex_cli = list(high = "gpt-6.1-terra", low = "gpt-6-luna"),
+    openai = list(high = "gpt-6.1-terra", low = "gpt-6-luna"),
+    grok_cli = list(high = "grok-4.7", low = "grok-4.7"),
+    list(high = "", low = ""))
+}
+
+config_default_model <- function(provider) config_model_tiers(provider)$low
 
 config_apply_model_defaults <- function(cfg) {
-  if (!nzchar(as.character(cfg$model %||% "")[1])) {
-    default <- config_default_model(cfg$provider)
-    if (nzchar(default)) cfg$model <- default
-  }
+  tiers <- config_model_tiers(cfg$provider)
+  model <- trimws(as.character(cfg$model %||% "")[1])
+  strong <- trimws(as.character(cfg$strong_model %||% "")[1])
+  if (!nzchar(model) && nzchar(tiers$low)) model <- tiers$low
+  if (!nzchar(strong) && nzchar(tiers$high)) strong <- tiers$high
+  # Providers without defaults may use the saved low-end model as their high tier.
+  if (!nzchar(strong) && !nzchar(tiers$high) && nzchar(model)) strong <- model
+  cfg$model <- model
+  cfg$strong_model <- strong
   if (cfg$provider %in% c("grok_cli", "claude_cli", "codex_cli")) cfg$cli_use_login <- TRUE
   cfg
 }
@@ -40,7 +55,9 @@ config_set_model <- function(cfg, provider, model = "") {
   if (!provider %in% config_allowed_providers()) stop("Unknown provider.", call. = FALSE)
   cfg$provider <- provider
   model <- trimws(as.character(model %||% "")[1])
-  cfg$model <- if (nzchar(model)) model else config_default_model(provider)
+  cfg$model <- model
+  tiers <- config_model_tiers(provider)
+  cfg$strong_model <- tiers$high
   config_apply_model_defaults(cfg)
 }
 
@@ -73,6 +90,7 @@ load_config <- function() {
     for (k in intersect(names(saved), names(cfg))) cfg[[k]] <- saved[[k]]
     if (cfg$provider %in% c("claude_cli", "codex_cli", "grok_cli")) cfg$cli_use_login <- TRUE
   }
+  cfg <- config_apply_model_defaults(cfg)
   cfg$api_key <- NULL
   cfg
 }

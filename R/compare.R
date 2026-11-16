@@ -212,11 +212,9 @@ compare_node <- function(project, dataset, node, keys) {
     spec <- read_project_spec(project)
     keys <- layer_key_names(spec,dataset,parsed_node$paramcd,parsed_graph,project)
   }
-  if(!layered_node && !is.null(project) && exists("layer_keys_path",mode="function") && file.exists(layer_keys_path(project,dataset)))
-    keys <- layer_key_names(read_project_spec(project),dataset,"*",parsed_graph,project)
   if (is.list(parsed_node) && identical(parsed_node$kind, "records")) {
     p <- plain_frame(readRDS(p_path)); v <- plain_frame(readRDS(v_path))
-    all_keys <- if(!is.null(parsed_node$paramcd))layer_key_names(read_project_spec(project),dataset,parsed_node$paramcd,parsed_graph,project) else if(!isTRUE(parsed_graph$layered)&&file.exists(layer_keys_path(project,dataset)))layer_key_names(read_project_spec(project),dataset,"*",parsed_graph,project) else flat_chr(keys)
+    all_keys <- if(!is.null(parsed_node$paramcd)) layer_key_names(read_project_spec(project),dataset,parsed_node$paramcd,parsed_graph,project) else flat_chr(keys)
     missing <- setdiff(all_keys, union(names(p), names(v)))
     if (length(missing)) return(compare_fail(nrow(p), nrow(v), all_keys, paste0("Records missing key column(s): ", paste(missing, collapse=", "))))
     signature <- function(df) {

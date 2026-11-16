@@ -4,7 +4,8 @@ launch_demo <- function(dataset, app_dir, args = commandArgs(trailingOnly = TRUE
   data_dir <- file.path(demo_dir, "data")
   expected <- if (dataset == "adsl") {
     paste0(c("dm", "suppdm", "ex", "ds", "ae", "vs", "lb", "sv", "cm", "mh"), ".xpt")
-  } else c("vs.xpt", "adsl.xpt")
+  } else if (dataset == "adppk") c("ex.xpt", "pc.xpt", "vs.xpt", "lb.xpt", "adsl.xpt")
+  else c("vs.xpt", "adsl.xpt")
   present <- if (dir.exists(data_dir)) list.files(data_dir, pattern = "[.]xpt$", ignore.case = TRUE) else character()
   missing <- expected[!file.exists(file.path(data_dir, expected))]
   if (length(missing) && length(present)) {

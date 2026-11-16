@@ -153,7 +153,7 @@ test_that("prompts carry catalog names and the fake extractor resolves them", {
   expect_match(user, "AGE")
   expect_match(user, "DM \\(3 rows\\)")
   side <- side_user_prompt("primary", spec, g0, "ADSL.TRTSDT", character(), catalog = cat)
-  expect_false(grepl("USUBJID", side, fixed = TRUE))
+  expect_match(side,"KEYS: USUBJID",fixed=TRUE)
   expect_false(grepl("SOURCE_CATALOG:", side, fixed = TRUE))
   expect_false(grepl("S1", side, fixed = TRUE))
   side_v <- side_user_prompt("validation", spec, g0, "ADSL.TRTSDT", character(), catalog = cat)

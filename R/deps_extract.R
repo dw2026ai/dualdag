@@ -60,6 +60,8 @@ parse_spec_categories <- function(text) {
 # One node per variable. With parameter rows, non-key analysis variables become
 # one param_variable node per PARAMCD (F9i). Keys and structural ids stay single.
 graph_skeleton <- function(spec, dataset, layer_keys = NULL, carry_members = NULL) {
+  # Keys are resolved from the spec only; legacy graph/file values are ignored.
+  layer_keys <- NULL
   dataset <- toupper(dataset)
   vars <- spec_vars(spec, dataset)
   params <- spec_params(spec, dataset)
@@ -68,14 +70,9 @@ graph_skeleton <- function(spec, dataset, layer_keys = NULL, carry_members = NUL
   paramcds <- if (nrow(params)) toupper(trimws(params$PARAMCD)) else character()
   paramcds <- paramcds[nzchar(paramcds)]
   has_params <- length(paramcds) > 0L
-  key_order <- suppressWarnings(as.integer(vars$Key))
-  key_rows <- which(!is.na(key_order) & key_order != 0L)
-  requested_dataset_keys <- if (!is.null(layer_keys) && !is.null(layer_keys[["*"]])) toupper(flat_chr(layer_keys[["*"]])) else toupper(vars$Variable[key_rows])
-  dataset_dropped <- setdiff(requested_dataset_keys,c(toupper(vars$Variable),"USUBJID"))
-  if(length(dataset_dropped))graph$warnings <- list(paste0("Dropped unknown dataset key(s): ",paste(dataset_dropped,collapse=", "),"."))
-  dataset_keys <- intersect(requested_dataset_keys,toupper(vars$Variable))
-  multi_key_records <- !has_params && length(dataset_keys) >= 2L
-  if (multi_key_records || (!is.null(layer_keys) && !is.null(layer_keys[["*"]]))) graph$key_vars <- unique(dataset_keys)
+  spec_dataset_keys <- key_names(spec, dataset)
+  multi_key_records <- !has_params && length(spec_dataset_keys) >= 2L
+  if (multi_key_records) graph$key_vars <- spec_dataset_keys
   if (has_params) {
     carry_members <- unique(toupper(trimws(flat_chr(carry_members))))
     carry_members <- intersect(carry_members, paramcds)
@@ -95,22 +92,11 @@ graph_skeleton <- function(spec, dataset, layer_keys = NULL, carry_members = NUL
     layer_codes <- unique(vapply(paramcds, layer_of, ""))
     if ("CARRY_OVER" %in% layer_codes) layer_codes <- c("CARRY_OVER", setdiff(layer_codes, "CARRY_OVER"))
     graph$layered <- TRUE
-    key <- suppressWarnings(as.integer(vars$Key))
-    spec_keys <- toupper(vars$Variable[!is.na(key) & key != 0L])
-    valid_vars <- toupper(trimws(vars$Variable))
-    normalize_keys <- function(pc) {
-      requested <- if (!is.null(layer_keys) && !is.null(layer_keys[[pc]])) toupper(flat_chr(layer_keys[[pc]])) else spec_keys
-      dropped <- setdiff(requested, c(valid_vars,"USUBJID","PARAMCD"))
-      if (length(dropped)) graph$warnings <<- c(graph$warnings %||% list(), list(paste0("Dropped unknown layer key(s) for ", pc, ": ", paste(dropped, collapse=", "), ".")))
-      unique(c("USUBJID", "PARAMCD", intersect(requested, valid_vars)))
-    }
+    normalize_keys <- function(pc) key_names(spec, dataset, pc)
     member_keys <- setNames(lapply(paramcds, normalize_keys), paramcds)
     graph$layer_keys <- setNames(lapply(layer_codes, function(layer) {
       codes <- paramcds[vapply(paramcds, function(pc) identical(layer_of(pc), layer), TRUE)]
-      explicit <- !is.null(layer_keys) && !is.null(layer_keys[[layer]])
-      if (explicit && identical(layer,"CARRY_OVER")) {
-        unique(c("USUBJID", "PARAMCD", intersect(toupper(flat_chr(layer_keys[[layer]])), valid_vars)))
-      } else unique(unlist(member_keys[codes], use.names=FALSE))
+      unique(unlist(member_keys[codes], use.names=FALSE))
     }), layer_codes)
     graph$key_vars <- unique(unlist(graph$layer_keys, use.names=FALSE))
     dataset_level <- function(i, var) {
@@ -123,11 +109,6 @@ graph_skeleton <- function(spec, dataset, layer_keys = NULL, carry_members = NUL
     }
     ds_level_rows <- which(vapply(seq_len(nrow(vars)),function(i)dataset_level(i,toupper(trimws(vars$Variable[[i]]))),TRUE))
     ds_level_vars <- toupper(trimws(vars$Variable[ds_level_rows]))
-    for(pc in layer_codes) {
-      bad <- intersect(graph$layer_keys[[pc]],ds_level_vars)
-      if(length(bad)) graph$warnings <- c(graph$warnings %||% list(),list(paste0("Dropped dataset-level layer key(s) for ",pc,": ",paste(bad,collapse=", "),".")))
-      graph$layer_keys[[pc]] <- setdiff(graph$layer_keys[[pc]],bad)
-    }
     graph$key_vars <- unique(unlist(graph$layer_keys,use.names=FALSE))
     nodes <- list(); groups <- list(); layers <- list()
     for (i in seq_len(nrow(vars))) {
@@ -468,76 +449,7 @@ layer_keys_write <- function(project, dataset, keys) {
 }
 
 layer_key_names <- function(spec, dataset, paramcd, graph=NULL, project=NULL) {
-  ds <- safe_ds(dataset); pc <- toupper(paramcd %||% "*")
-  overrides <- if (!is.null(project)) layer_keys_read(project, ds) else list()
-  if (!is.null(overrides[[pc]])) return(unique(c("USUBJID", if (pc != "*") "PARAMCD", overrides[[pc]])))
-  if (!is.null(graph$layer_keys[[pc]])) return(unique(c("USUBJID", if (pc != "*") "PARAMCD", toupper(flat_chr(graph$layer_keys[[pc]])))))
-  vars <- spec_vars(spec, ds); key <- suppressWarnings(as.integer(vars$Key))
-  unique(c("USUBJID", if (pc != "*") "PARAMCD", toupper(vars$Variable[!is.na(key) & key != 0L])))
-}
-
-layer_keys_set <- function(project, dataset, paramcd, keys, dry_run=FALSE) {
-  ds <- safe_ds(dataset); pc <- toupper(trimws(as.character(paramcd %||% "*")[1]))
-  state_project <- if(is.environment(project))project else open_project(project)
-  graph <- load_graph(state_project,ds); spec <- read_project_spec(state_project)
-  if (is.null(graph)) stop("No dependency graph yet.",call.=FALSE)
-  layered <- isTRUE(graph$layered)
-  if (layered && !pc %in% vapply(graph$layers, function(x)x$paramcd,"")) stop("Unknown parameter layer: ",pc,".",call.=FALSE)
-  if (!layered && pc != "*") stop("Use paramcd '*' for a dataset-level key set.",call.=FALSE)
-  requested <- unique(toupper(trimws(flat_chr(keys))))
-  requested <- requested[nzchar(requested)]
-  required <- c("USUBJID",if(layered)"PARAMCD")
-  missing_required <- setdiff(required,requested)
-  if (length(missing_required)) stop("Required key column(s) cannot be removed: ",paste(missing_required,collapse=", "),".",call.=FALSE)
-  vars <- toupper(trimws(spec_vars(spec,ds)$Variable))
-  fixed <- c("USUBJID",if(layered)"PARAMCD")
-  optional <- setdiff(requested,fixed)
-  unknown <- setdiff(optional,vars)
-  if(length(unknown))stop("Unknown key variable(s): ",paste(unknown,collapse=", "),".",call.=FALSE)
-  if(layered) {
-    ds_vars <- vapply(Filter(function(n)identical(n$kind,"dataset_variable"),graph$nodes),`[[`,"","var")
-    bad <- intersect(optional,ds_vars)
-    if(length(bad))stop("Dataset-level variable(s) cannot be layer keys: ",paste(bad,collapse=", "),".",call.=FALSE)
-  }
-  old_keys <- layer_key_names(spec,ds,pc,graph,state_project)
-  if(setequal(old_keys,requested)) return(list(ok=TRUE,keys=as.list(old_keys),reset_count=0L,dry_run=isTRUE(dry_run)))
-  extraction <- graph$extraction %||% extract_reply_read(state_project,ds)
-  if(is.null(extraction)) stop("This graph has no stored extraction reply; re-extract it before changing keys.",call.=FALSE)
-  key_map <- graph$layer_keys %||% list("*"=graph$key_vars %||% character())
-  key_map[[pc]] <- requested
-  carry_members <- vapply(Filter(function(x) identical(x$classification,"carry_over"), as_records(extraction$parameter_classification$parameters)),function(x)toupper(x$paramcd %||% ""),"")
-  fresh <- graph_skeleton(spec,ds,key_map,carry_members)
-  fresh$extraction <- extraction
-  fresh <- merge_extract(fresh,extraction,spec)
-  fresh$generated_parameters <- graph$generated_parameters
-  fresh$cycle_cuts <- graph$cycle_cuts
-  fresh$param_uses <- graph$param_uses
-  fresh$layer_warnings <- graph$layer_warnings
-  affected <- pc
-  if(layered) {
-    pg <- tryCatch(param_graph_read(state_project,ds),error=function(e)NULL)
-    seeds <- if (identical(pc,"CARRY_OVER")) unique(c(pc,carry_members)) else pc
-    affected <- seeds
-    repeat {
-      children <- unique(vapply(Filter(function(e)toupper(e$from)%in%affected,pg$edges %||% list()),function(e)toupper(e$to),""))
-      more <- setdiff(children,affected); if(!length(more))break
-      affected <- c(affected,more)
-    }
-    affected <- unique(c(if(identical(pc,"CARRY_OVER")) "CARRY_OVER", affected))
-  }
-  ids <- if(layered)unique(unlist(lapply(affected,function(code)c(layer_node_ids(graph,code),layer_node_ids(fresh,code))),use.names=FALSE)) else
-    unique(c(vapply(graph$nodes,`[[`,"","id"),vapply(fresh$nodes,`[[`,"","id")))
-  reset_count <- length(ids)
-  if(isTRUE(dry_run))return(list(ok=TRUE,keys=as.list(requested),reset_count=reset_count,dry_run=TRUE,affected_layers=as.list(affected)))
-  stored <- layer_keys_read(state_project,ds); stored[[pc]] <- setdiff(requested,fixed)
-  layer_keys_write(state_project,ds,stored)
-  extract_reply_write(state_project,ds,extraction)
-  fresh$extraction <- NULL
-  save_graph(state_project,fresh)
-  for(id in ids) reset_one_node(state_project,ds,id,delete_code=TRUE)
-  for(side in c("primary","validation")) if(exists("work_path",mode="function")) unlink(work_path(project_dir_of(state_project),ds,side))
-  write_state(state_project)
-  list(ok=TRUE,keys=as.list(requested),reset_count=reset_count,dry_run=FALSE,affected_layers=as.list(affected))
+  key_names(spec, safe_ds(dataset), paramcd)
 }
 
 # ---- extraction: plan, one pass per parameter, check, cycles ----
@@ -550,7 +462,7 @@ extract_plan_prompt <- function(dataset) paste0(extract_prompt_header("extract_p
   "You are a senior CDISC ADaM reviewer. Read this whole specification and split all its rows into batches for another model, which will list what each row uses.\n",
   "Simple, alike rows can share a batch of 10 to 20 rows. Long or complex rows go alone or in a batch of 2 to 3. Use as few batches as quality allows. Every row id must appear exactly once.\n",
   "Also read the Key column and return the row keys. For a dataset with parameters, give the keys of each PARAMCD: a derived parameter may not have a time point. With no parameters, use '*'. A parameter you leave out uses the Key column.\n",
-  'Return only JSON: {"batches":[{"kind":"simple|complex","rows":["V1"]}],"layer_keys":{"PARAMCD":["VAR"]}}')
+  'Return only JSON: {"batches":[{"kind":"simple|complex","rows":["V1"]}]}. Keys come only from the spec Key column; do not choose keys.')
 
 extract_rows_prompt <- function(dataset, spec_text, layered, catalog_lines = character(), grouped = FALSE) paste0(extract_prompt_header("extract_rows", dataset),
   "You are a CDISC ADaM expert. This is the whole specification:\n\n", spec_text, "\n\n",
@@ -850,13 +762,10 @@ extract_dependencies <- function(cfg, spec, dataset, catalog = NULL, project = N
   spec_text <- paste(vapply(rows, function(r) r$block, ""), collapse = "\n\n")
   classification <- if (nrow(spec_params(spec, dataset))) extract_classification(cfg, spec, dataset, project) else NULL
   plan <- extract_plan(cfg, spec, dataset, spec_text, project)
-  keys <- plan$layer_keys
-  overrides <- if (!is.null(project)) layer_keys_read(project, dataset) else list()
-  for (pc in names(overrides)) { if (!is.list(keys)) keys <- list(); keys[[pc]] <- overrides[[pc]] }
+  keys <- NULL
   classes <- classification$parameters %||% list()
   carry_codes <- vapply(Filter(function(x) identical(x$classification,"carry_over"), classes), function(x) toupper(x$paramcd), "")
   graph <- graph_skeleton(spec, dataset, carry_members=carry_codes)
-  if (is.list(keys) && length(keys) && (isTRUE(graph$layered) || !is.null(keys[["*"]]))) graph <- graph_skeleton(spec, dataset, keys, carry_codes)
   layered <- isTRUE(graph$layered)
   all_layers <- if (layered) vapply(graph$layers, function(l) l$paramcd, "") else character()
   layers <- all_layers
@@ -998,7 +907,6 @@ extract_dependencies <- function(cfg, spec, dataset, catalog = NULL, project = N
   }
   if (length(unknown_cuts)) warnings <- c(warnings, list(paste0("The check named unknown edges, ignored: ", paste(unknown_cuts, collapse = ", "), ".")))
   extraction <- extract_to_parsed(items, graph, unresolved, categories)
-  extraction$layer_keys <- graph$layer_keys %||% (if (!is.null(keys[["*"]])) keys)
   extraction$param_uses <- param_uses; extraction$context <- as.list(items$context); extraction$not_placed <- as.list(items$not_placed)
   extraction$parameter_classification <- classification
   g$extraction <- extraction

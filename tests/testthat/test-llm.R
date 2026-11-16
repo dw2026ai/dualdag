@@ -268,7 +268,7 @@ test_that("claude_cli sends the prompt on stdin and reads the result field", {
     expect_equal(r$model, "claude-sonnet-5-5")
     expect_equal(r$usage$total_cost_usd, 0.001)
     args <- readLines(paste0(capture, ".args"), warn = FALSE)
-    expect_true(all(c("-p", "--output-format", "json", "--tools", "--no-session-persistence",
+    expect_true(all(c("-p", "--output-format", "stream-json", "--verbose", "--tools", "--no-session-persistence",
                       "--strict-mcp-config") %in% args))
     expect_true("--system-prompt-file" %in% args)
     expect_false("--system-prompt" %in% args)

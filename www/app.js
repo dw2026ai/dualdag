@@ -71,6 +71,7 @@
     fullRun: { dataset: "", status: null, steps: {}, errors: {}, statusError: "", timer: null, busy: false, started: {}, loadingDataset: "" },
     extractJobs: {}, extractErrors: {}, extractTimer: null,
     coderWindow: null, coderWindowTimer: null, superAgent: null, appAdmin: null, appAdminTimer: null,
+    adminEnabled: false, adminEnableBusy: false, adminEnableError: "", adminCliStatus: null, adminSessionProvider: "",
     catalog: null, catalogStatus: "", catOpen: {}, catFilter: {},
     view: { x: 16, y: 16, k: 1 }, didFit: false, userView: false, layout: null, drag: null, poll: null,
     layoutSave: null, category: null,
@@ -90,6 +91,11 @@
   };
 
   try { ui.codeGuide = localStorage.getItem("dualdag.codeGuide") === "1"; } catch (err) { ui.codeGuide = false; }
+  ui.progressCollapsed = {};
+  try {
+    const savedProgressCollapse = JSON.parse(localStorage.getItem("dualdag.progressCollapsed") || "{}");
+    if (savedProgressCollapse && typeof savedProgressCollapse === "object") ui.progressCollapsed = savedProgressCollapse;
+  } catch (err) { ui.progressCollapsed = {}; }
   try { ui.data.side = localStorage.getItem("dualdag.dataSide") === "validation" ? "validation" : "primary"; } catch (err) { ui.data.side = "primary"; }
   try { ui.parameterClassificationCollapsed = localStorage.getItem("dualdag.parameterClassificationCollapsed") === "1"; } catch (err) { ui.parameterClassificationCollapsed = false; }
   ui.fold["g:input"] = true;
@@ -183,6 +189,7 @@
     } catch (err) { /* Resizing remains available for this session. */ }
   }
   function bindResizablePanes(root) {
+    // Keep every resize-grid parent limited to its declared pane children.
     const specs = [
       ["spec", ".tab-spec .maincol", [".dagrow", ".split"], "y"],
       ["spec", ".tab-spec .dagrow", [".dagmain", ".dagagent"], "x"],
@@ -2727,14 +2734,25 @@
     const b = S && S.batch;
     if (!b || !b.total) return "";
     if (!b.finished) {
-      const n = (Number(b.done) || 0) + (b.current ? 1 : 0);
-      const step = b.step === "compare" ? "Comparing" : "Generating";
-      const label = "Batch " + n + "/" + b.total + " · " + step + (b.current ? " " + b.current : "");
+      const n = b.step === "fullrun" ? (Number(b.done) || 0) : (Number(b.done) || 0) + (b.current ? 1 : 0);
+      const step = b.step === "compare" ? "Comparing" : (b.step === "fullrun" ? "Full Run" : "Generating");
+      const layer = b.current && String(b.current).indexOf("@") >= 0 ? String(b.current).split("@").pop() : (b.current ? "Dataset" : "");
+      const label = (b.whole_dataset ? "Whole dataset " : "Batch ") + n + "/" + b.total + (layer ? " · " + layer : "") + " · " + step + (b.current ? " " + b.current : "");
       return '<span class="pill job"><span class="spin"></span>' + esc(label) + " "
-        + btn("batch-stop", "Stop", { cls: "sm" }) + "</span>";
+        + btn("batch-stop", b.whole_dataset ? "Cancel" : "Stop", { cls: "sm" }) + "</span>";
     }
     const c = batchCounts(b);
-    const label = "Batch done: " + c.l3 + " Data matched, " + c.l2 + " Generated, " + c.failed + " failed";
+    if (b.whole_dataset && b.stopped_at) return '<span class="pill" role="alert">Stopped at ' + esc(displayNode(b.stopped_at.node)) + ': ' + esc(b.stopped_at.reason) + ' ' + btn("batch-results", "Results", { cls: "sm" }) + "</span>";
+    if (b.whole_dataset && b.fullrun) {
+      const fr = b.fullrun;
+      const sideResult = function (side) {
+        const x = fr[side] || {};
+        return x.ok ? side + " " + (x.rows == null ? "?" : x.rows) + " rows × " + (x.columns == null ? "?" : x.columns) + " columns" : side + " error: " + (x.error || "Full Run failed");
+      };
+      const label = fr.status === "running" ? "Whole dataset: Full Run running on primary and validation" : "Whole dataset Full Run " + fr.status + " · " + sideResult("primary") + " · " + sideResult("validation");
+      return '<span class="pill" role="status">' + esc(label) + " " + btn("batch-results", "Results", { cls: "sm" }) + "</span>";
+    }
+    const label = (b.whole_dataset ? "Whole dataset" : "Batch") + " done: " + c.l3 + " Data matched, " + c.l2 + " Generated, " + c.failed + " failed";
     return '<span class="pill">' + esc(label) + " " + btn("batch-results", "Results", { cls: "sm" }) + "</span>";
   }
   function headerHtml() {
@@ -2743,7 +2761,7 @@
     return '<header><h1 class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7l9-5Z"/><path d="m3.5 7.2 8.5 4.9 8.5-4.9M12 12.1V22"/></svg><span>dualdag</span></h1><span class="path muted" title="' + esc(projectText()) + '">' + esc(projectText()) + "</span>"
       + mock + batchHtml() + busy
       + '<span class="outbound">' + esc(outboundNote()) + "</span>"
-      + '<button type="button" class="sm" data-act="admin-open">App Admin</button>'
+      + '<button type="button" class="sm admin-btn" data-act="admin-open"><svg class="admin-btn-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.3v4.2M8 11.3h.01"/></svg>Admin agent</button>'
       + '<span class="spacer"></span><span id="st" class="muted">' + esc(ui.msg) + "</span></header>" + lastErrorHtml();
   }
   function tabBarHtml() {
@@ -2766,7 +2784,7 @@
       const on = ui.tab === t.id;
       return '<button type="button" role="tab" data-act="tab" data-tab="' + t.id + '" aria-selected="' + (on ? "true" : "false") + '"'
         + (on ? ' class="on"' : "") + '><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">' + icons[t.id] + '</svg><span>' + esc(t.label) + "</span></button>";
-    }).join("") + (SUPER_TABS[ui.tab] ? '<button type="button" class="sm" data-act="super-agent">Super agent</button>' : "") + "</nav>";
+    }).join("") + "</nav>" + (SUPER_TABS[ui.tab] ? '<div class="tab-actions"><button type="button" class="sm" data-act="super-agent">Super agent</button></div>' : "");
   }
   function fullRunSideHtml(side) {
     const s = ui.fullRun.status && ui.fullRun.status.dataset === ui.dataset && ui.fullRun.status.sides
@@ -3226,9 +3244,20 @@
     },
     codex_cli: {
       bin: "codex", label: "Codex CLI (ChatGPT login)", allowOther: true,
-      models: ["", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"]
+      models: ["", "gpt-6.1-terra", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"]
     }
   };
+  const MODEL_TIERS = {
+    claude_cli: { high: "claude-opus-5-5", low: "claude-sonnet-5-5" },
+    anthropic: { high: "claude-opus-5-5", low: "claude-sonnet-5-5" },
+    codex_cli: { high: "gpt-6.1-terra", low: "gpt-6-luna" },
+    openai: { high: "gpt-6.1-terra", low: "gpt-6-luna" },
+    grok_cli: { high: "grok-4.7", low: "grok-4.7" },
+    openai_compatible: { high: "", low: "" }
+  };
+  function modelTier(provider, tier) {
+    return (MODEL_TIERS[provider] || MODEL_TIERS.openai_compatible)[tier] || "";
+  }
   function cliModelLabel(id) {
     if (id === "") return "(CLI default)";
     return id;
@@ -3256,36 +3285,20 @@
     function opt(val, lab) {
       return '<option value="' + val + '"' + (v.provider === val ? " selected" : "") + ">" + esc(lab) + "</option>";
     }
-    let useOther = false;
-    let cliSel = cli ? cli.models[0] : "";
-    if (cli && cli.allowOther && ui.cfgOther) {
-      useOther = true;
-      cliSel = "__other__";
-    } else if (cli && cli.models.indexOf(v.model) >= 0) {
-      cliSel = v.model;
-    } else if (cli && cli.allowOther) {
-      useOther = true;
-      cliSel = "__other__";
-    }
-    const cliOpts = cli ? cli.models.map(function (m) {
-      return '<option value="' + m + '"' + (m === cliSel ? " selected" : "") + ">" + esc(cliModelLabel(m)) + "</option>";
-    }).join("") : "";
-    const otherOpt = cli && cli.allowOther
-      ? '<option value="__other__"' + (useOther ? " selected" : "") + ">Other…</option>" : "";
     const apiLabel = cli ? "" : " (API key)";
     const head = '<div class="field"><label for="cfg-provider">Provider</label><select id="cfg-provider">'
       + (ui.loggedCliProviders || ["grok_cli", "claude_cli", "codex_cli"]).map(function (p) { return opt(p, CLI_PROVIDERS[p].label); }).join("")
       + opt("openai", "OpenAI" + apiLabel) + opt("anthropic", "Anthropic" + apiLabel) + opt("openai_compatible", "OpenAI-compatible" + apiLabel) + "</select></div>";
-    const strongField = '<div class="field"><label for="cfg-strong-model">Strong model for the DAG (optional)</label><input id="cfg-strong-model" value="'
-      + esc(ui.cfgDraft && ui.cfgDraft.strong_model != null ? ui.cfgDraft.strong_model : (S && S.config_public && S.config_public.strong_model) || "") + '" placeholder="Blank uses the model above"></div>';
-    const left = cli
-      ? head + '<div class="field"><label for="cfg-model-cli">Model</label><select id="cfg-model-cli">' + cliOpts + otherOpt + "</select></div>"
-        + (useOther ? '<div class="field"><label for="cfg-model-other">Other model</label><input id="cfg-model-other" value="'
-          + esc(v.model) + '" placeholder="Model id"></div>' : "") + strongField
-      : head + '<div class="field"><label for="cfg-base">Base URL</label><input id="cfg-base" value="' + esc(v.base_url) + '" placeholder="for example https://openrouter.ai/api/v1"></div>'
-        + '<div class="field"><label for="cfg-model">Model</label><input id="cfg-model" value="' + esc(v.model) + '" placeholder="for example gpt-4.1"></div>' + strongField
-        + '<div class="field"><label for="cfg-key">API key</label><input id="cfg-key" type="password" value="' + esc(v.key) + '" placeholder="' + esc(v.hint) + '" autocomplete="off"></div>'
-        + '<label><input id="cfg-clear" type="checkbox"' + (v.clear ? " checked" : "") + "> Clear the saved key</label>";
+    const lowValue = v.model || modelTier(v.provider, "low");
+    const highValue = ui.cfgDraft && ui.cfgDraft.strong_model != null ? ui.cfgDraft.strong_model : (S && S.config_public && S.config_public.strong_model) || modelTier(v.provider, "high");
+    const lowField = '<div class="field"><label for="cfg-model">Low-end model</label><input id="cfg-model" value="' + esc(lowValue) + '" placeholder="Model id"><small class="muted">For routine code, review, and agent work.</small></div>';
+    const highField = '<div class="field"><label for="cfg-strong-model">High-end model</label><input id="cfg-strong-model" value="' + esc(highValue) + '" placeholder="Model id"><small class="muted">For DAG planning, checks, and Admin work.</small></div>';
+    const left = head
+      + (cli ? "" : '<div class="field"><label for="cfg-base">Base URL</label><input id="cfg-base" value="' + esc(v.base_url) + '" placeholder="for example https://openrouter.ai/api/v1"></div>')
+      + lowField + highField
+      + (cli ? "" :
+        '<div class="field"><label for="cfg-key">API key</label><input id="cfg-key" type="password" value="' + esc(v.key) + '" placeholder="' + esc(v.hint) + '" autocomplete="off"></div>'
+        + '<label><input id="cfg-clear" type="checkbox"' + (v.clear ? " checked" : "") + "> Clear the saved key</label>");
     const right = cli
       ? cliLoginHtml(v.provider) + '<p class="muted model-help">Uses your ' + esc(v.provider === "claude_cli" ? "Claude Code" : v.provider === "codex_cli" ? "Codex" : "Grok") + " login.</p>"
       : '<p class="muted model-help">For example https://openrouter.ai/api/v1. Do not include /chat/completions. Leave blank to use the provider default.</p>'
@@ -3302,12 +3315,33 @@
       + '</span>' + settingsBtn("cfg-test", "Check connection", "check", { cls: "sm" })
       + '<button type="button" class="help-button" title="Configure data and model for your analysis" aria-label="Help">?</button></div></div>'
       + '<div class="settings-grid">'
+      + appAdminSettingsHtml()
       + setCard("Spec", "Load variable and parameter templates", "spec", specSettingsHtml())
       + setCard("Analysis dataset formats", "Classify datasets for the correct extraction flow", "spec", datasetFormatSettingsHtml())
       + setCard("Data xpt", "Manage XPT data files", "data", xptSettingsHtml())
       + setCard("Model", "Configure CLI provider and model", "model", modelSettingsHtml(), "model-card")
       + '</div>'
       + "</div>";
+  }
+  function appAdminSettingsHtml() {
+    const p = cfgValues().provider;
+    const status = ui.adminCliStatus || {}, choices = ["claude", "codex", "grok"].filter(function (name) { const s=status[name]||{}; return s.installed && (name === "grok" || s.logged_in); });
+    const stored = ui.adminSessionProvider;
+    const adminProvider = stored && choices.indexOf(stored) >= 0 ? stored : (choices[0] || "claude");
+    const highModel = ui.cfgDraft && ui.cfgDraft.strong_model != null ? ui.cfgDraft.strong_model
+      : (S && S.config_public && S.config_public.strong_model) || modelTier(p, "high");
+    const adminName = adminProvider === "claude" ? "Claude Code" : adminProvider === "codex" ? "Codex" : "Grok CLI";
+    const chosen = choices.length ? choices.map(function (name) { return name === "claude" ? "Claude Code" : name === "codex" ? "Codex" : "Grok CLI"; }).join(", ") : "No ready CLI provider detected";
+    return '<section class="setcard admin-settings"><div class="setcard-head"><div><h2>Admin agent</h2><p>Allow a CLI agent to work in the app and open project.</p></div></div>'
+      + '<label class="admin-enable"><input type="checkbox" id="admin-enabled"' + (ui.adminEnabled ? ' checked' : '') + (ui.adminEnableBusy ? ' disabled' : '') + '> <span>Enable Admin agent</span></label>'
+      + '<p class="admin-warning">The Admin agent can read and change any file this computer lets dualdag use, including your project and dualdag itself. Project snapshots are kept so you can undo.</p>'
+      + '<p class="muted admin-provider">' + (highModel ? 'Admin panel defaults to ' + esc(adminName) + ' with high-end model ' + esc(highModel) + '.' : 'Admin panel defaults to ' + esc(adminName) + '; set a high-end model to name the model it will use.') + ' Available CLI providers: ' + esc(chosen) + '.</p>'
+      + (ui.adminEnableError ? '<p class="bad">' + esc(ui.adminEnableError) + '</p>' : '') + '</section>';
+  }
+  async function loadAdminSettings() {
+    try { const r = await api("/api/admin/enabled"); ui.adminEnabled = !!r.enabled; const s=await api("/api/admin/state"); ui.adminCliStatus=s.status||{}; ui.adminSessionProvider=(s.session||{}).provider||""; }
+    catch(e) { ui.adminEnableError=e.message||String(e); }
+    if (ui.tab === "settings") render();
   }
   function datasetFormatSettingsHtml() {
     const datasets = asArray(S && S.spec && S.spec.datasets);
@@ -3596,9 +3630,9 @@
   }
   function selectionBarHtml() {
     const n = (ui.sel || []).length;
-    if (!n) return "";
     const running = batchRunning();
     const on = ui.compareAfter !== false;
+    if (!n) return "";
     return '<span class="pill">' + n + " selected</span>"
       + '<label class="chk"><input id="batch-compare" type="checkbox"' + (on ? " checked" : "") + "> Compare after generating</label>"
       + btn("batch-go", "Generate selected", { cls: "pri", disabled: running || !ui.dataset || isDatasetExtracting(ui.dataset), title: isDatasetExtracting(ui.dataset) ? "Dependencies are being extracted for this dataset." : (running ? "A batch is already running." : "") })
@@ -3723,7 +3757,7 @@
       .filter(function (item) { return String(item.classification || "") === "carry_over"; })
       .map(function (item) { return String(item.paramcd || "").toUpperCase(); }).filter(Boolean);
   }
-  function centerHtml() {
+  function centerHtml(keyNotices) {
     const names = dsNames();
     const tabs = names.map(function (d) {
       return btn("dataset", d, { cls: d === ui.dataset ? "sm on" : "sm", data: { ds: d } });
@@ -3763,6 +3797,7 @@
         : lineageReviewContextHtml() + '<div id="dagwrap">' + dagSvg(variableViewGraph) + categoryHtml() + dagContextMenuHtml() + '</div>';
     }
     const tools = '<div class="ph"><div class="tabs">' + (tabs || '<span class="muted">No dataset</span>') + "</div>"
+      + (ui.dataset && !parameter ? btn("whole-dataset", "Run whole dataset", { cls: "pri", disabled: batchRunning() || isDatasetExtracting(ui.dataset), title: batchRunning() ? "A batch is already running." : "" }) : "")
       + (SHOW_DAG_MULTI_SELECT && !parameter && g ? selectMenuHtml() : "")
       + (SHOW_DAG_MULTI_SELECT && !parameter ? selectionBarHtml() : "")
       + (ui.dataset && parameter && pg && (pg.nodes || []).length ? btn("start-new-dag", "Reset", { cls: "sm danger", disabled: paramBusy }) : "")
@@ -3787,7 +3822,7 @@
     if (hasParams && !parameter && (!pg || !(pg.nodes || []).length) && !extracting && !actionWait) body = '<div class="empty">Generate the Parameter DAG first.</div>';
     body = '<div class="dag-canvas-row">' + (!parameter ? runQueueHtml() : "") + '<div class="dag-canvas-main">' + body + '</div>' + (hasParams ? parameterClassificationHtml(g) : "") + '</div>';
     if (g && g.carry_over_regenerate_required && !parameter) body = '<p class="warn carry-over-regenerate" role="status">This saved DAG uses the old per-member carry-over format. Regenerate the CARRY_OVER group to continue.</p>' + body;
-    return graphSwitchHtml(hasParams) + tools + '<div class="ph legend-ph">' + legendHtml() + "</div>" + missHint
+    return graphSwitchHtml(hasParams) + tools + (keyNotices || "") + '<div class="ph legend-ph">' + legendHtml() + "</div>" + missHint
       + (!parameter ? cycleCutsHtml(g) : "") + body;
   }
   function busyNow() {
@@ -3875,12 +3910,60 @@
     const logActs = '<span class="logacts">' + explainBtn + "</span>";
     const hit = !whole && ui.fromSpec ? " hit" : "";
     const pathWarn = specPathWarningHtml(side);
-    return '<section class="codeside" data-scroll-key="code-side-' + side + '">' + head + '<div class="code-body-split">'
+    const bodySplit = '<div class="code-body-split">'
       + '<div class="code-area">' + pathWarn + (whole ? "" : reviewHtml(side))
       + (trimmed ? body.replace('class="codeview lines"', 'class="codeview lines' + hit + '" data-scroll-key="code-view-' + side + '"') : body) + '</div>'
       + (whole ? "" : '<div class="log-area"><div class="loghead"><span>Run log</span><span class="logbadges" data-side="' + side + '">' + logBadges(side, renderedLog) + '</span>' + logActs + "</div>"
         + '<pre class="log" data-scroll-key="log-' + side + '" data-side="' + side + '">' + renderedLog.html + "</pre></div>")
-      + "</div></section>";
+      + "</div>";
+    const rail = side === "primary" && !whole ? progressRailHtml() : "";
+    return '<section class="codeside" data-scroll-key="code-side-' + side + '">' + head + '<div class="code-side-content' + (rail && progressRailCollapsed() ? ' progress-collapsed' : '') + '">'
+      + rail + bodySplit + '</div></section>';
+  }
+  function progressRailCollapsed() {
+    if (Object.prototype.hasOwnProperty.call(ui.progressCollapsed, "primary")) return !!ui.progressCollapsed.primary;
+    return window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
+  }
+  function progressRailHtml() {
+    const progress = nodeState(ui.node).progress && nodeState(ui.node).progress.primary;
+    const steps = ["inputs", "writing", "running", "reviewing", "rewriting", "rerunning", "compare"];
+    const current = progress && String(progress.step || "");
+    const events = asArray(progress && progress.events).map(String);
+    const lastEvent = events.length ? events[events.length - 1] : "";
+    const lastAt = progress && Date.parse(progress.last_event_at || progress.step_started_at || "");
+    const elapsed = progress && !progress.done && isFinite(lastAt) ? Math.max(0, Math.floor((Date.now() - lastAt) / 1000)) : 0;
+    const stuck = !!(progress && !progress.done && !progress.error && elapsed >= 60);
+    const error = String(progress && progress.error || "");
+    const currentIndex = steps.indexOf(current);
+    const visible = steps.filter(function (step) { return step !== "rewriting" || current === "rewriting" || !!(progress && progress.step_timings && Object.prototype.hasOwnProperty.call(progress.step_timings, "rewriting")); });
+    const rows = visible.map(function (step) {
+      const idx = steps.indexOf(step), duration = progress && progress.step_timings && progress.step_timings[step];
+      const isCurrent = step === current;
+      const isDone = progress && progress.done
+        ? (currentIndex >= 0 && idx <= currentIndex)
+        : (!isCurrent && currentIndex >= 0 && idx < currentIndex);
+      const isError = !!error && isCurrent;
+      const state = isError ? "error" : (stuck && isCurrent ? "stuck" : (isCurrent && !progress.done ? "current" : (isDone ? "done" : "pending")));
+      const seconds = isCurrent && !progress.done ? elapsed : (duration == null ? null : Number(duration));
+      const glyph = state === "done" ? "✓" : (state === "error" || state === "stuck" ? "!" : (state === "current" ? "●" : "○"));
+      return '<li class="progress-step ' + state + '"><span class="progress-glyph">' + glyph + '</span><span class="progress-step-name">' + esc(step) + '</span><span class="progress-seconds">' + (seconds == null ? "" : esc(String(Math.floor(seconds)) + "s")) + '</span></li>';
+    }).join("");
+    const inputs = asArray(progress && progress.inputs).map(String);
+    const issueText = error + " " + asArray(ui.detail && ui.detail.reviews && ui.detail.reviews.primary && ui.detail.reviews.primary.issues).map(function (x) { return typeof x === "string" ? x : JSON.stringify(x); }).join(" ");
+    const inputBoxes = inputs.map(function (ref) {
+      const bare = ref.split(".").pop();
+      const eventHit = events.some(function (line) { return line.toLowerCase().indexOf(ref.toLowerCase()) >= 0 || line.toLowerCase().indexOf(bare.toLowerCase()) >= 0; });
+      const inputError = !!issueText && (issueText.toLowerCase().indexOf(ref.toLowerCase()) >= 0 || issueText.toLowerCase().indexOf(bare.toLowerCase()) >= 0);
+      return '<span class="progress-input' + (inputError ? ' input-error' : (eventHit ? ' input-hit' : '')) + '"' + (inputError ? ' title="' + esc(issueText.trim()) + '"' : '') + '>' + esc(ref) + '</span>';
+    }).join("");
+    const eventItems = events.slice(-5).map(function (line) { return '<li>' + esc(line) + '</li>'; }).join("");
+    const warning = stuck ? '<p class="progress-warning">Possibly stuck — no activity for ' + elapsed + 's in ' + esc(current) + (lastEvent ? ', last: ' + esc(lastEvent) : '') + '</p>' : "";
+    const err = error ? '<p class="progress-error">' + esc(error) + '</p>' : "";
+    const collapsed = progressRailCollapsed();
+    return '<aside class="progress-rail" aria-label="Primary progress"><button type="button" class="progress-collapse" data-act="progress-collapse" aria-expanded="' + (!collapsed) + '" title="' + (collapsed ? 'Expand progress' : 'Collapse progress') + '"><span aria-hidden="true">' + (collapsed ? '›' : '‹') + '</span><span class="progress-collapse-label">Progress</span></button>'
+      + '<div class="progress-rail-body"><h4>Progress</h4><ol class="progress-steps">' + rows + '</ol>' + warning + err
+      + (inputs.length ? '<div class="progress-section"><b>Inputs</b><div class="progress-inputs">' + inputBoxes + '</div></div>' : '')
+      + '<details class="progress-events" open><summary>Model events</summary>' + (eventItems ? '<ul>' + eventItems + '</ul>' : '<p class="muted">No model events yet.</p>') + '</details></div></aside>';
   }
   function coderWindowHtml() {
     const w = ui.coderWindow;
@@ -4078,26 +4161,36 @@
   function appAdminHtml() {
     const w = ui.appAdmin; if (!w) return "";
     const turns = (w.session && w.session.turns || []).map(function (m) {
-      const changed = Array.isArray(m.changed_files) ? (m.changed_files.length ? '<small>Changed: ' + esc(m.changed_files.join(", ")) + '</small>' : '<small>No files changed.</small>') : '';
+      const files = Array.isArray(m.changed_files) ? m.changed_files : [];
+      const group = function (prefix,label) { const items=files.filter(function(f){return String(f).indexOf(prefix)===0;}).map(function(f){return String(f).slice(prefix.length);}); return items.length ? '<div><b>'+label+'</b><ul>'+items.map(function(f){return '<li>'+esc(f)+'</li>';}).join('')+'</ul></div>' : ''; };
+      const changed = m.role === "assistant" ? '<div class="admin-changed"><b>Files changed</b>' + (files.length ? group("project/","Project")+group("app/","App") : '<p>No files changed.</p>') + (files.some(function(f){return String(f).indexOf("app/")===0;}) ? '<p class="admin-restart-note">Restart dualdag to apply app changes.</p>' : '') + (m.snapshot && m.snapshot.id ? '<small>Snapshot '+esc(m.snapshot.id)+' · '+esc(m.snapshot.size_bytes||0)+' bytes</small>' : '') + '<button class="sm" data-act="admin-undo">Undo</button></div>' : '';
       const did = Array.isArray(m.actions) && m.actions.length ? '<div class="admin-did"><b>What it did</b><ul>' + m.actions.map(function(a){return '<li><b>'+esc(a.name||a.kind||"Action")+'</b>'+(a.detail?' · '+esc(a.detail):'')+'</li>';}).join("") + '</ul></div>' : (m.role === "assistant" && !m.failed ? '<small>What it did: no tool actions reported.</small>' : '');
+      const providerLabel = adminProviderLabel(m.provider || (m.role === "assistant" ? (w.session || {}).provider : ""));
+      const modelUsed = m.model ? '<small class="admin-model-used">Used ' + esc(providerLabel || "provider") + ' · ' + esc(m.model) + '</small>' : '';
       const restart = m.restart ? '<button class="sm" data-act="admin-restart">Restart app</button>' : '';
       const relaunch = m.relaunch ? '<button class="sm" data-act="admin-relaunch-note">Relaunch app</button>' : '';
       const usage = m.usage ? (m.usage.model_context_window
         ? contextUsageLine({input:m.usage.input_tokens,limit:m.usage.model_context_window,calls:1})
         : '<small>Usage · ' + esc(m.usage.input_tokens == null ? 'not reported' : String(m.usage.input_tokens) + ' input / ' + String(m.usage.output_tokens || 0) + ' output tokens') + '</small>') : '';
       const notice = m.notice ? '<div class="admin-status">'+esc(m.notice)+'</div>' : '';
-      return '<article class="coder-turn"><div class="coder-message coder-' + (m.role === "assistant" ? "assistant" : "user") + '"><b>' + (m.role === "assistant" ? "App Admin" : "You") + '</b><div class="coder-bubble">' + esc(m.text || "") + '</div>' + did + usage + changed + notice + restart + relaunch + '</div></article>';
+      return '<article class="coder-turn"><div class="coder-message coder-' + (m.role === "assistant" ? "assistant" : "user") + '"><b>' + (m.role === "assistant" ? "App Admin" : "You") + '</b><div class="coder-bubble">' + esc(m.text || "") + '</div>' + modelUsed + did + usage + changed + notice + restart + relaunch + '</div></article>';
     }).join("");
     const statuses = w.status || {};
-    const options = ["claude", "codex"].filter(function (p) { const s = statuses[p] || {}; return s.installed && s.logged_in; });
-    const picker = options.length ? '<select id="admin-provider">' + options.map(function(p){return '<option value="'+p+'"'+(w.provider===p?' selected':'')+'>'+(p==='claude'?'Claude Code':'Codex')+'</option>';}).join("") + '</select>' : '<span class="muted">Install and log in to Claude Code or Codex to use App Admin.</span>';
+    const cliOptions = ["claude", "codex", "grok"].filter(function (p) { const s = statuses[p] || {}; return s.installed && (p === "grok" || s.logged_in); });
+    const apiOptions = ["anthropic", "openai", "openai_compatible"].filter(function (p) { const s = statuses[p] || {}; return s.available === true || s.configured === true; });
+    const options = cliOptions.concat(apiOptions);
+    const picker = options.length ? '<select id="admin-provider">' + options.map(function(p){return '<option value="'+p+'"'+(w.provider===p?' selected':'')+'>'+esc(adminProviderLabel(p))+'</option>';}).join("") + '</select>' : '<span class="muted">No ready provider. Configure an API key in Settings or install and log in to a CLI provider.</span>';
     const statusInfo=w.statusMessage?{text:w.statusMessage,restart:w.statusFlags&&w.statusFlags.restart,relaunch:w.statusFlags&&w.statusFlags.relaunch,refresh:w.statusFlags&&w.statusFlags.refresh}:null;
     const status = statusInfo && statusInfo.text ? '<div class="admin-status">'+esc(statusInfo.text)+(statusInfo.restart?' <button class="sm" data-act="admin-restart">Restart app</button>':'')+(statusInfo.relaunch?' <button class="sm" data-act="admin-relaunch-note">Relaunch app</button>':'')+'</div>' : '';
-    return '<div class="coder-overlay app-admin-overlay" role="dialog"><div class="coder-overlay-head"><b>App Admin</b><div class="coder-head-actions">' + picker + '<button class="sm quiet" data-act="admin-new">New conversation</button><button class="coder-close" data-act="admin-close">×</button></div></div><p class="admin-notice">' + esc(w.notice || "") + '</p><div class="coder-overlay-content"><div class="coder-conversation">' + (turns || '<p class="coder-empty">Start a conversation to edit this app and the open project.</p>') + '</div></div><div class="coder-composer"><textarea id="app-admin-message" rows="2" placeholder="Ask App Admin to change this app or project">' + esc(w.draft || "") + '</textarea>' + (w.busy ? '<button class="sm" data-act="admin-stop">Stop</button>' : '<button class="pri sm" data-act="admin-send" ' + (!options.length || !(w.draft||"").trim() ? 'disabled' : '') + '>Send</button>') + '<button class="sm" data-act="admin-undo">Undo</button></div>' + status + (w.error ? '<p class="bad">'+esc(w.error)+'</p>' : '') + '</div>';
+    const snapshots=(w.snapshots||[]).map(function(s){return '<div class="admin-snapshot"><span><b>'+esc(new Date(s.time).toLocaleString())+'</b><small>'+esc(s.message||'Snapshot')+' · '+esc(s.size_bytes||0)+' bytes</small></span><button class="sm" data-act="admin-restore" data-id="'+esc(s.id)+'">Restore</button></div>';}).join('');
+    return '<div class="coder-overlay app-admin-overlay" role="dialog"><div class="coder-overlay-head"><b>Admin agent</b><div class="coder-head-actions">' + picker + '<button class="sm quiet" data-act="admin-new">Clear</button><button class="coder-close" data-act="admin-close">×</button></div></div><p class="admin-notice">' + esc(w.notice || "") + '</p><div class="coder-overlay-content"><div class="coder-conversation">' + (turns || '<p class="coder-empty">Start a conversation to edit this app and the open project.</p>') + (w.busy ? '<div class="coder-working">Admin agent is working…</div>' : '') + '</div></div><div class="coder-composer"><textarea id="app-admin-message" rows="2" placeholder="Ask Admin agent to change this app or project">' + esc(w.draft || "") + '</textarea>' + (w.busy ? '<button class="sm" disabled>Working…</button>' : '<button class="pri sm" data-act="admin-send" ' + (!options.length || !w.enabled || !(w.draft||"").trim() ? 'disabled' : '') + '>Send</button>') + '</div><details class="admin-snapshots"><summary>Snapshots ('+(w.snapshots||[]).length+')</summary>'+ (snapshots||'<p class="muted">No snapshots yet.</p>') + '</details>' + status + (w.error ? '<p class="bad">'+esc(w.error)+'</p>' : '') + '</div>';
+  }
+  function adminProviderLabel(provider) {
+    return ({claude:"Claude Code",codex:"Codex",grok:"Grok CLI",anthropic:"Anthropic API",openai:"OpenAI API",openai_compatible:"OpenAI-compatible API"})[provider] || String(provider || "");
   }
   async function openAppAdmin() {
     if (ui.appAdminTimer) clearTimeout(ui.appAdminTimer);
-    try { const data = await api("/api/admin/state"); const session=data.session||{}, status=data.status||{}; let provider=session.provider||"claude"; if(!(status[provider]&&status[provider].installed&&status[provider].logged_in)) provider=status.claude&&status.claude.installed&&status.claude.logged_in?"claude":status.codex&&status.codex.installed&&status.codex.logged_in?"codex":"claude"; ui.appAdmin = { session:session, status:status, notice:data.notice || "", provider:provider, draft:"", busy:data.active, error:"", statusMessage:session.last_notice||"", statusFlags:session.last_notice_flags||{} }; }
+    try { const data = await api("/api/admin/state"), snaps=await api("/api/admin/snapshots"), enabled=await api("/api/admin/enabled"); const session=data.session||{}, status=data.status||{}; const ready=function(p){const s=status[p]||{};return ["anthropic","openai","openai_compatible"].indexOf(p)>=0?(s.available===true||s.configured===true):(s.installed&&(p==="grok"||s.logged_in));}; const candidates=["claude","codex","grok","anthropic","openai","openai_compatible"]; let provider=session.provider||""; if(!ready(provider)) provider=candidates.find(ready)||"claude"; ui.appAdmin = { session:session, status:status, snapshots:snaps.snapshots||[], enabled:!!enabled.enabled, notice:data.notice || "", provider:provider, draft:"", busy:data.active, error:"", statusMessage:session.last_notice||"", statusFlags:session.last_notice_flags||{} }; }
     catch (e) { ui.appAdmin = {session:{},status:{},notice:"",provider:"claude",draft:"",busy:false,error:e.message||String(e)}; }
     render(); scheduleAppAdminPoll();
   }
@@ -4110,13 +4203,14 @@
     const w=ui.appAdmin; if(!w)return;
     try {
       const data=await api("/api/admin/state"); if(ui.appAdmin!==w)return;
-      w.session=data.session||{}; w.busy=!!data.active; w.statusMessage=w.session.last_notice||""; w.statusFlags=w.session.last_notice_flags||{};
+      w.session=data.session||{}; w.status=data.status||w.status||{}; w.busy=!!data.active; w.statusMessage=w.session.last_notice||""; w.statusFlags=w.session.last_notice_flags||{};
+      try { w.snapshots=(await api("/api/admin/snapshots")).snapshots||[]; } catch(_) {}
       render(); scheduleAppAdminPoll();
     } catch(e) { if(ui.appAdmin===w){w.error=e.message||String(e);w.busy=false;render();} }
   }
   async function sendAppAdmin() {
     const w=ui.appAdmin; if(!w||w.busy||!w.draft.trim()) return;
-    const msg=w.draft.trim(); w.draft=""; w.busy=true; w.error=""; render(); scheduleAppAdminPoll();
+    const msg=w.draft.trim(); w.draft=""; w.busy=true; w.error=""; ui.skipValueRestore = true; ui.keepFocus = "app-admin-message"; render(); scheduleAppAdminPoll();
     try { await api("/api/admin/chat",{provider:w.provider,message:msg}); }
     catch(e){ if(ui.appAdmin===w)w.error=e.message||String(e); }
     if(ui.appAdmin===w) {
@@ -4127,7 +4221,7 @@
   }
   async function sendSuperAgent() {
     const w = ui.superAgent; if (!w || w.busy || !w.draft.trim()) return;
-    const message = w.draft.trim(); w.draft = ""; w.busy = true; w.error = ""; w.turns.push({ role: "user", text: message }); render();
+    const message = w.draft.trim(); w.draft = ""; w.busy = true; w.error = ""; w.turns.push({ role: "user", text: message }); ui.skipValueRestore = true; ui.keepFocus = "super-agent-message"; render();
     try {
       const result = await api("/api/super-agent/chat", { tab: w.tab, dataset: ui.dataset || "", side: ui.data.side, messages: w.turns.map(function (m) { return { role: m.role, text: m.text }; }) });
       let reply = result.text || "Done.", card = "";
@@ -5016,7 +5110,8 @@
     } else if (ui.tab === "settings") {
       body = '<div class="workspace tab-settings">' + settingsHtml() + "</div>";
     } else {
-      body = '<div class="workspace tab-spec' + (ui.multiMode ? " multimode" : "") + '"><div class="maincol" data-scroll-key="spec-main"><div class="dagrow"><div class="dagmain" data-scroll-key="dag-main">' + centerHtml()
+      const keyNotice = (function () { const p = curPack() || {}; let h = ''; const scope = encodeURIComponent(String(S.project || '')) + '.' + encodeURIComponent(String(ui.dataset || '')); const oldKey = p.legacy_key_notice || ''; const legacyNoticeKey = 'dualdag.keyMigration.' + scope; const usubjidNoticeKey = 'dualdag.usubjidKeyNotice.' + scope; if (oldKey && localStorage.getItem(legacyNoticeKey) !== '1') h += '<div class="admin-notice key-notice" data-testid="legacy-key-notice" data-notice-key="' + esc(legacyNoticeKey) + '">This project has old key overrides that are no longer used. Put these keys in the spec: ' + esc(oldKey) + ' <button class="sm quiet" data-act="dismiss-key-notice">Dismiss</button></div>'; if (p.usubjid_key_notice && localStorage.getItem(usubjidNoticeKey) !== '1') h += '<div class="admin-notice key-notice" data-testid="usubjid-key-notice" data-notice-key="' + esc(usubjidNoticeKey) + '">' + esc(p.usubjid_key_notice) + ' <button class="sm quiet" data-act="dismiss-key-notice">Dismiss</button></div>'; return h; })();
+      body = '<div class="workspace tab-spec' + (ui.multiMode ? " multimode" : "") + '"><div class="maincol" data-scroll-key="spec-main"><div class="dagrow"><div class="dagmain" data-scroll-key="dag-main">' + centerHtml(keyNotice)
         + '</div>' + paramAgentHtml() + '</div><div class="split">' + bottomHtml() + "</div></div></div>";
     }
     app.innerHTML = headerHtml() + tabBarHtml() + body + coderWindowHtml() + superAgentHtml() + appAdminHtml();
@@ -5546,6 +5641,7 @@
     if (ui.tab === "spec") ui.didFit = false;
     syncHash();
     render();
+    if (ui.tab === "settings") loadAdminSettings();
     if (ui.tab === "run" && previousTab !== "run") loadFullRunStatus(false);
     if (ui.tab === "code" && ui.codeScope === "all") {
       ensureProgram().then(function () { render(); }).catch(function (e) {
@@ -6135,6 +6231,12 @@
       render();
       return;
     }
+    if (act === "progress-collapse") {
+      ui.progressCollapsed.primary = !progressRailCollapsed();
+      try { localStorage.setItem("dualdag.progressCollapsed", JSON.stringify(ui.progressCollapsed)); } catch (err) { /* Collapse remains available for this session. */ }
+      render();
+      return;
+    }
     if (act === "code-jump") {
       const id = t.getAttribute("data-id");
       ui.codeScope = "var";
@@ -6252,10 +6354,16 @@
       return;
     }
     if (act === "batch-go") { await startBatch(); return; }
+    if (act === "whole-dataset") {
+      if (!ui.dataset || batchRunning()) return;
+      await api("/api/batch", { dataset: ui.dataset, whole_dataset: true });
+      await refresh(); setMsg("Whole dataset run started"); return;
+    }
     if (act === "batch-stop") {
+      const whole = !!(S && S.batch && S.batch.whole_dataset);
       await api("/api/batch/cancel", {});
       await refresh();
-      setMsg("Batch will stop after the current variable");
+      setMsg(whole ? "Whole dataset run will cancel after the current step" : "Batch will stop after the current variable");
       return;
     }
     if (act === "batch-results") { openModal(batchResultsHtml()); return; }
@@ -6277,6 +6385,7 @@
       render();
       return;
     }
+    if (act === "dismiss-key-notice") { const notice = t.closest('[data-testid$="-key-notice"]'); if (notice) localStorage.setItem(notice.getAttribute('data-notice-key') || '', '1'); render(); return; }
     if (act === "dag-context-action") {
       const action = t.getAttribute("data-action"), c = ui.dagContext;
       if (!c) return;
@@ -6291,7 +6400,8 @@
     if (act === "admin-send") { sendAppAdmin(); return; }
     if (act === "admin-stop") { try { await api("/api/admin/stop", {}); } catch(e) { if(ui.appAdmin)ui.appAdmin.error=e.message||String(e); } return; }
     if (act === "admin-new") { try { await api("/api/admin/new", {}); if(ui.appAdmin){ui.appAdmin.statusMessage="";ui.appAdmin.statusFlags={};ui.appAdmin.error="";} await openAppAdmin(); } catch(e) { if(ui.appAdmin)ui.appAdmin.error=e.message||String(e); render(); } return; }
-    if (act === "admin-undo") { try { const u=await api("/api/admin/undo", {}); await refresh(); if(ui.appAdmin){await pollAppAdminState();ui.appAdmin.statusMessage=u.ok?(u.notice||"Undo restored the last snapshot."):(u.message||"Nothing to undo.");ui.appAdmin.statusFlags=u.flags||{};ui.appAdmin.error="";render();} } catch(e) { if(ui.appAdmin)ui.appAdmin.error=e.message||String(e); render(); } return; }
+    if (act === "admin-undo") { if(!confirm("Undo the latest Admin agent turn and restore its snapshot?"))return; try { const u=await api("/api/admin/undo", {}); await refresh(); if(ui.appAdmin){await pollAppAdminState();ui.appAdmin.statusMessage=u.ok?(u.notice||"Undo restored the last snapshot."):(u.message||"Nothing to undo.");ui.appAdmin.statusFlags=u.flags||{};ui.appAdmin.error="";render();} } catch(e) { if(ui.appAdmin)ui.appAdmin.error=e.message||String(e); render(); } return; }
+    if (act === "admin-restore") { const id=t.getAttribute("data-id"); if(!id||!confirm("Restore this snapshot? Dualdag will first save the current project state so you can restore it afterward."))return; try { const result=await api("/api/admin/restore",{snapshot_id:id}); await refresh(); if(ui.appAdmin){const w=ui.appAdmin;const state=await api("/api/admin/state");w.session=state.session||{};w.busy=!!state.active;w.snapshots=(await api("/api/admin/snapshots")).snapshots||[];w.statusMessage="Snapshot restored. Restore snapshot "+result.undo_snapshot_id+" to undo this restore.";render();} } catch(e) { if(ui.appAdmin)ui.appAdmin.error=e.message||String(e); render(); } return; }
     if (act === "admin-restart") { try { await api("/api/admin/restart",{}); location.reload(); } catch(e) { if(ui.appAdmin){const message=e.message||String(e);if(message.indexOf("run.R changed")>=0){ui.appAdmin.statusMessage=message;ui.appAdmin.statusFlags={relaunch:true};}else ui.appAdmin.error=message+" Restart could not be completed; relaunch with the same project and port.";} render(); } return; }
     if (act === "admin-relaunch-note") { if(ui.appAdmin){ui.appAdmin.statusMessage="Stop the app and relaunch run.R with the same project and port; this window cannot reload the launcher.";ui.appAdmin.statusFlags={};render();} return; }
     if (act === "super-clear") { if (ui.superAgent) { localStorage.removeItem(superKey(ui.superAgent.tab)); ui.superAgent.turns = []; render(); } return; }
@@ -6503,7 +6613,7 @@
       w.suMessages = asArray(w.suMessages);
       const last = w.suMessages[w.suMessages.length - 1];
       if (!(last && last.role === "user" && String(last.text || "") === message)) w.suMessages.push({ role: "user", text: message });
-      w.sending = true; w.draft = ""; w.error = ""; render();
+      w.sending = true; w.draft = ""; w.error = ""; ui.skipValueRestore = true; ui.keepFocus = "coder-window-message"; render();
       try {
         const out = await api("/api/node/su", { dataset: w.dataset, node: w.node, side: w.side, message: message, messages: w.suMessages });
         asArray(out.calls).forEach(function (line) {
@@ -6526,7 +6636,7 @@
     }
     w.optimisticMessage = message;
     w.optimisticThreadLength = asArray(w.data && w.data.thread).length;
-    w.sending = true; w.draft = ""; w.error = ""; syncCoderWindowPoll(); render();
+    w.sending = true; w.draft = ""; w.error = ""; ui.skipValueRestore = true; ui.keepFocus = "coder-window-message"; syncCoderWindowPoll(); render();
     try {
       await api("/api/node/agent", { dataset: w.dataset, node: w.node, side: w.side, message: message });
     } catch (err) {
@@ -6554,6 +6664,7 @@
     if (!message) { setMsg("Enter a question"); return; }
     ui.dagDraft = "";
     ui.skipValueRestore = true;
+    ui.keepFocus = "dag-text";
     ui.threadToEnd = "dag-thread";
     ui.dagAsking = true;
     ui.running = true;
@@ -6580,7 +6691,7 @@
     const el = document.getElementById("param-dag-text");
     const message = String((el && el.value) || ui.paramDraft || "").trim();
     if (!message) { setMsg("Enter a question"); return; }
-    ui.paramDraft = ""; ui.paramAsking = true; render();
+    ui.paramDraft = ""; ui.paramAsking = true; ui.skipValueRestore = true; ui.keepFocus = "param-dag-text"; render();
     try {
       const r = await api("/api/param-graph/ask", { dataset: ui.dataset, message: message });
       ui.paramPending = asRecords(r && r.changes);
@@ -6728,9 +6839,7 @@
     ui.cfgDraft = {
       provider: prov.value,
       base_url: (document.getElementById("cfg-base") || {}).value || "",
-      model: CLI_PROVIDERS[prov.value]
-        ? cliModelFromForm()
-        : ((document.getElementById("cfg-model") || {}).value || ""),
+      model: ((document.getElementById("cfg-model") || {}).value || ""),
       strong_model: (document.getElementById("cfg-strong-model") || {}).value || "",
       key: (document.getElementById("cfg-key") || {}).value || "",
       clear: !!(document.getElementById("cfg-clear") && document.getElementById("cfg-clear").checked),
@@ -6748,7 +6857,7 @@
     const body = {
       provider: prov.value,
       base_url: cli ? "" : document.getElementById("cfg-base").value,
-      model: cli ? cliModelFromForm().trim() : document.getElementById("cfg-model").value,
+      model: document.getElementById("cfg-model").value.trim(),
       strong_model: ((document.getElementById("cfg-strong-model") || {}).value || "").trim(),
     };
     if (cli) body.cli_use_login = true;
@@ -6800,6 +6909,11 @@
   function onChange(e) {
     const t = e.target;
     if (!t || !t.id) return;
+    if (t.id === "admin-enabled") {
+      ui.adminEnableBusy=true; ui.adminEnableError=""; render();
+      api("/api/admin/enabled",{enabled:!!t.checked}).then(function(r){ui.adminEnabled=!!r.enabled;}).catch(function(err){ui.adminEnableError=err.message||String(err);}).then(function(){ui.adminEnableBusy=false;render();});
+      return;
+    }
     if (t.id === "coder-su-switch" && ui.coderWindow) {
       ui.coderWindow.suMode = !!t.checked;
       if (!t.checked) ui.coderWindow.suMessages = [];
@@ -6858,24 +6972,15 @@
     } else if (t.id === "cfg-provider") {
       ui.cfgTest = null;
       readCfgForm();
-      const next = CLI_PROVIDERS[ui.cfgDraft.provider];
-      if (next && next.models.indexOf(ui.cfgDraft.model) < 0) {
-        ui.cfgDraft.model = next.allowOther ? "" : (next.models[0] || "");
-        ui.cfgOther = false;
-      } else {
-        ui.cfgOther = false;
-      }
+      ui.cfgDraft.model = modelTier(ui.cfgDraft.provider, "low");
+      ui.cfgDraft.strong_model = modelTier(ui.cfgDraft.provider, "high");
+      ui.cfgOther = false;
       ui.cliStatus = null;
       ui.cfgTest = null;
       render();
     } else if (t.id === "cfg-clear" || t.id === "cfg-cli-login") {
       if (t.id === "cfg-cli-login") ui.cfgTest = null;
       readCfgForm();
-    } else if (t.id === "cfg-model-cli") {
-      ui.cfgTest = null;
-      ui.cfgOther = t.value === "__other__";
-      readCfgForm();
-      render();
     }
   }
   function onInput(e) {
@@ -6910,6 +7015,11 @@
       ui.cfgTest = null;
       if (!ui.cfgDraft) readCfgForm();
       if (ui.cfgDraft) ui.cfgDraft.model = t.value;
+    }
+    else if (t.id === "cfg-strong-model") {
+      ui.cfgTest = null;
+      if (!ui.cfgDraft) readCfgForm();
+      if (ui.cfgDraft) ui.cfgDraft.strong_model = t.value;
     }
     else if (t.id === "cfg-base" || t.id === "cfg-model" || t.id === "cfg-key") { ui.cfgTest = null; readCfgForm(); }
     else if (t.id === "data-filter") {

@@ -1,5 +1,6 @@
 demo_launcher_root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
 demo_launcher_rscript <- file.path(R.home("bin"), "Rscript")
+source(file.path(testthat::test_path(), "..", "fixtures", "helper.R"))
 
 demo_launcher_run <- function(script, args = character(), env = character()) {
   output <- suppressWarnings(system2(demo_launcher_rscript, c(shQuote(script), shQuote(args)),
@@ -14,12 +15,13 @@ demo_make_data_files <- function(root, dataset) {
   dir.create(data_dir, recursive = TRUE)
   files <- if (dataset == "adsl") {
     paste0(c("dm", "suppdm", "ex", "ds", "ae", "vs", "lb", "sv", "cm", "mh"), ".xpt")
-  } else c("vs.xpt", "adsl.xpt")
+  } else if (dataset == "adppk") c("ex.xpt", "pc.xpt", "vs.xpt", "lb.xpt", "adsl.xpt")
+  else c("vs.xpt", "adsl.xpt")
   file.create(file.path(data_dir, files))
 }
 
 test_that("demo launchers source run.R, set and restore the project, and forward CLI flags", {
-  for (dataset in c("adsl", "advs")) {
+  for (dataset in c("adsl", "advs", "adppk")) {
     root <- tempfile(paste0("demo-launcher-", dataset, "-"))
     dir.create(root)
     dir.create(file.path(root, "demos", dataset), recursive = TRUE)
@@ -141,4 +143,65 @@ test_that("a fetch failure names the retry command and does not launch run.R", {
   expect_false(identical(output$status, 0L))
   expect_true(any(grepl("Rscript tools/get_demo_data.R advs", output$output, fixed = TRUE)))
   expect_false(file.exists(sentinel))
+})
+
+test_that("ADPPK demo spec loads and dependency extraction runs with the fake model", {
+  app <- new.env(parent = globalenv())
+  files <- list.files(file.path(demo_launcher_root, "R"), pattern = "[.]R$", full.names = TRUE)
+  utils <- files[grepl("/utils[.]R$", files)]
+  for (f in c(utils, setdiff(files, utils))) sys.source(f, envir = app)
+
+  proj <- tempfile("adppk-demo-project-")
+  dir.create(file.path(proj, "spec"), recursive = TRUE)
+  dir.create(file.path(proj, "data"))
+  file.copy(file.path(demo_launcher_root, "demos", "adppk", "spec", "variable.csv"),
+            file.path(proj, "spec", "variable.csv"))
+  file.copy(file.path(demo_launcher_root, "demos", "adppk", "spec", "parameter.csv"),
+            file.path(proj, "spec", "parameter.csv"))
+  for (nm in c("ex", "pc", "vs", "lb", "adsl")) {
+    path <- file.path(demo_launcher_root, "demos", "adppk", "data", paste0(nm, ".xpt"))
+    skip_if_not(file.exists(path), "ADPPK demo data has not been fetched")
+    file.copy(path, file.path(proj, "data", basename(path)))
+  }
+  with_fake_llm({
+    p <- app$open_project(proj)
+    spec <- app$read_project_spec(p)
+    expect_equal(nrow(spec$variables), 67L)
+    expect_length(Filter(function(x) x$type %in% c("structure", "no_key"), spec$problems), 0L)
+    graph <- app$extract_dependencies(list(), spec, "ADPPK", catalog = app$build_source_catalog(proj), project = proj)
+    expect_true(length(graph$nodes) > 0L)
+    expect_true(any(vapply(graph$nodes, function(n) identical(n$id, "ADPPK.RECSEQ"), TRUE)))
+  })
+})
+
+test_that("ADPPK spec declares the five composite keys in order and leaves RECSEQ unkeyed", {
+  spec <- utils::read.csv(
+    file.path(demo_launcher_root, "demos", "adppk", "spec", "variable.csv"),
+    stringsAsFactors = FALSE, check.names = FALSE
+  )
+  keys <- spec$Variable[!is.na(spec$Key) & nzchar(trimws(spec$Key))]
+  key_order <- as.integer(spec$Key[!is.na(spec$Key) & nzchar(trimws(spec$Key))])
+
+  expect_identical(keys, c("STUDYID", "USUBJID", "AFRLT", "EVID", "CMT"))
+  expect_identical(key_order, 1:5)
+  expect_false("RECSEQ" %in% keys)
+})
+
+test_that("ADPPK independent reference build follows the committed 67-variable spec", {
+  data_dir <- file.path(demo_launcher_root, "demos", "adppk", "data")
+  skip_if_not(all(file.exists(file.path(data_dir, paste0(c("ex", "pc", "vs", "lb", "adsl"), ".xpt")))),
+              "ADPPK demo data has not been fetched")
+  builder <- new.env(parent = globalenv())
+  builder$.DUALDAG_ADPPK_REF_SOURCE_ONLY <- TRUE
+  sys.source(file.path(demo_launcher_root, "tools", "pharmaverse_adppk_ref.R"), envir = builder)
+  out <- builder$build_pharmaverse_adppk_ref(
+    data_dir = data_dir,
+    spec_file = file.path(demo_launcher_root, "demos", "adppk", "spec", "variable.csv")
+  )
+  expect_equal(dim(out), c(3522L, 67L))
+  expect_equal(names(out), utils::read.csv(
+    file.path(demo_launcher_root, "demos", "adppk", "spec", "variable.csv"),
+    stringsAsFactors = FALSE
+  )$Variable)
+  expect_equal(anyDuplicated(out$RECSEQ), 0L)
 })

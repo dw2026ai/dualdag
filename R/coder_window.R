@@ -38,7 +38,7 @@ su_context <- function(project, dataset, node, side) {
   own_status <- list(level=st$level,problem=st$problem,side=st$sides[[side]])
   list(code=read_text(file.path(sdir,"code.R")), log=su_cap_log(read_text(file.path(sdir,"log.txt"))),
     status=own_status, chat=Filter(function(t) identical(t$node,node), expert_read(root,dataset,side)),
-    keys=list(spec=spec_key_names(spec,dataset),layer=if(exists("layer_keys_path",mode="function") && file.exists(layer_keys_path(root,dataset))) read_json(layer_keys_path(root,dataset)) else list()),
+    keys=list(spec=spec_key_names(spec,dataset)),
     spec=whole_spec, graph=graph, parameter_graph=if(exists("param_graph_read",mode="function")) tryCatch(param_graph_read(root,dataset),error=function(e)NULL) else NULL,
     frames=frames, source_columns=cols)
 }

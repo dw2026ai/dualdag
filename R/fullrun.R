@@ -38,7 +38,7 @@ fullrun_plan <- function(project, dataset, side, graph = NULL, spec = NULL) {
   } else ids <- unique(c(key_ids, topo, ids))
   ids <- ids[ids %in% dataset_node_ids(project, spec, dataset)]
   layered <- !is.null(graph) && isTRUE(graph$layered)
-  plan <- list(ids = ids, keys = spec_key_names(spec, dataset), graph = graph, spec = spec, layered=layered)
+  plan <- list(ids = ids, keys = key_names(spec, dataset, if(layered) "PARAM" else NULL), graph = graph, spec = spec, layered=layered)
   if(multi_key_records){plan$multi_key_records<-TRUE;plan$records_id<-records_id;plan$spec_order<-toupper(spec_vars(spec,dataset)$Variable)}
   if (layered) {
     pg <- tryCatch(param_graph_read(project,dataset),error=function(e)NULL)

@@ -35,19 +35,20 @@ local({
     project <- opt("project", Sys.getenv("DUALDAG_PROJECT", ""))
     if (!nzchar(project)) project <- file.path(path.expand("~"), "dualdag-projects", "default")
     project <- normalizePath(project, winslash="/", mustWork=TRUE)
-    snapshot_root <- file.path(project,".dualdag","app-admin","snapshots")
+    snapshot_root <- file.path(project,".dualdag","admin_snapshots")
     dirs <- if(dir.exists(snapshot_root))list.dirs(snapshot_root,recursive=FALSE,full.names=TRUE)else character()
     dirs <- sort(dirs[file.exists(file.path(dirs,"manifest.json"))],decreasing=TRUE)
     if(!length(dirs))stop("No App Admin snapshot exists in the selected project.")
     snap <- dirs[[1]]
     saved <- jsonlite::fromJSON(file.path(snap,"manifest.json"),simplifyVector=FALSE)
     manifest <- saved$manifest
-    scope <- function(key) startsWith(key,"app/") || (grepl("^project/(spec|programs|[.]dualdag/state)/",key) && !identical(key,"project/.dualdag/state/source_catalog.json"))
+    scope <- function(key) startsWith(key,"app/") || (startsWith(key,"project/") && !grepl("^project/[.]dualdag/admin_snapshots(/|$)",key))
     hash_only <- function(key,path=NULL) {
       value<-manifest[[key]]; saved_large<-length(value)>0L&&grepl("^(hash-only|large):",as.character(value[[1]]))
-      size<-if(is.null(path))NA_real_ else file.info(path)$size
-      saved_large||grepl("(^|/)data(/|$)",sub("^project/","",key))||(!is.na(size)&&size>5*1024^2)
+      saved_large
     }
+    history_path<-file.path(project,".dualdag","admin_log.jsonl")
+    history_before<-if(file.exists(history_path))readBin(history_path,"raw",n=as.integer(file.info(history_path)$size))else NULL
     snapshot_files <- unlist(saved$snapshot_files,use.names=FALSE)
     if(is.null(saved$snapshot_files)) {
       snapshot_files<-character()
@@ -58,21 +59,50 @@ local({
       }
       snapshot_files<-snapshot_files[vapply(snapshot_files,scope,TRUE)]
     }
+    symlinks <- function(root,kind) {
+      paths<-list.files(root,recursive=TRUE,all.files=TRUE,full.names=TRUE,no..=TRUE)
+      links<-vapply(paths,function(path){x<-Sys.readlink(path);if(length(x)&&!is.na(x))x else ""},"")
+      keep<-nzchar(links)
+      paths<-paths[keep];links<-links[keep]
+      if(!length(paths))return(setNames(character(),character()))
+      rel<-substring(gsub("\\\\","/",paths),nchar(gsub("\\\\","/",root))+2L)
+      keys<-paste0(kind,"/",rel);ok<-vapply(paths,function(path){parent<-dirname(path);if(identical(parent,root))return(TRUE);parts<-strsplit(substring(gsub("\\\\","/",parent),nchar(gsub("\\\\","/",root))+2L),"/",fixed=TRUE)[[1]];cur<-root;!any(vapply(parts,function(part){cur<<-file.path(cur,part);x<-Sys.readlink(cur);length(x)&&!is.na(x)&&nzchar(x)},TRUE))},TRUE)
+      links<-links[ok&vapply(keys,scope,TRUE)];keys<-keys[ok&vapply(keys,scope,TRUE)];setNames(links,keys)
+    }
+    restore_links <- function(keys) {
+      for(key in unique(keys)) {
+        kind<-sub("/.*$","",key);if(!kind%in%c("app","project"))next
+        root<-if(kind=="app")app_dir else project;rel<-sub("^(app|project)/","",key);path<-file.path(root,rel)
+        if(!scope(key))next
+        parent<-dirname(path);parts<-if(identical(parent,root))character()else strsplit(substring(gsub("\\\\","/",parent),nchar(gsub("\\\\","/",root))+2L),"/",fixed=TRUE)[[1]];cur<-root
+        linked<-any(vapply(parts,function(part){cur<<-file.path(cur,part);x<-Sys.readlink(cur);length(x)&&!is.na(x)&&nzchar(x)},TRUE));if(linked)next
+        expected<-manifest[[key]];target<-if(length(expected)&&startsWith(as.character(expected[[1]]),"symlink:"))substring(as.character(expected[[1]]),9L)else ""
+        current<-Sys.readlink(path);is_link<-length(current)&&!is.na(current)&&nzchar(current)
+        if(!nzchar(target)){if(is_link)unlink(path,recursive=TRUE,force=TRUE);next}
+        if(is_link&&identical(current,target))next
+        if(file.exists(path)||dir.exists(path)||is_link)unlink(path,recursive=TRUE,force=TRUE)
+        dir.create(dirname(path),recursive=TRUE,showWarnings=FALSE);file.symlink(target,path)
+      }
+    }
+    current_links<-c(symlinks(app_dir,"app"),symlinks(project,"project"))
+    saved_links<-names(manifest)[startsWith(vapply(manifest,as.character,""),"symlink:")]
+    restore_links(union(union(names(current_links),saved_links),snapshot_files))
     for(kind in c("app","project")) {
       root<-if(kind=="app")app_dir else project; prefix<-paste0(kind,"/")
       for(key in snapshot_files[startsWith(snapshot_files,prefix)]) {
         rel<-sub("^(app|project)/","",key); source<-file.path(snap,kind,rel); target<-file.path(root,rel)
         if(file.exists(source)&&!dir.exists(source)){dir.create(dirname(target),recursive=TRUE,showWarnings=FALSE);file.copy(source,target,overwrite=TRUE)}
       }
-      existing<-if(kind=="app")list.files(root,recursive=TRUE,all.files=TRUE,full.names=TRUE,no..=TRUE) else
-        unlist(lapply(c("spec","programs",file.path(".dualdag","state")),function(d)list.files(file.path(root,d),recursive=TRUE,all.files=TRUE,full.names=TRUE,no..=TRUE)),use.names=FALSE)
+      existing<-list.files(root,recursive=TRUE,all.files=TRUE,full.names=TRUE,no..=TRUE)
       existing<-existing[!file.info(existing)$isdir%in%TRUE]
-      existing<-existing[!grepl("(^|/)([.]git|node_modules|[.]cache)(/|$)",gsub("\\\\","/",existing))]
+      existing<-existing[!vapply(existing,function(path){rel<-substring(gsub("\\\\","/",path),nchar(gsub("\\\\","/",root))+2L);parts<-strsplit(rel,"/",fixed=TRUE)[[1]];cur<-root;any(vapply(parts,function(part){cur<<-file.path(cur,part);link<-Sys.readlink(cur);length(link)&&!is.na(link)&&nzchar(link)},TRUE))},TRUE)]
       for(f in existing) {
         rel<-substring(normalizePath(f,winslash="/"),nchar(normalizePath(root,winslash="/"))+2L); key<-paste0(prefix,rel)
         if(scope(key)&&!key%in%snapshot_files&&!hash_only(key,f))unlink(f,force=TRUE)
       }
     }
+    restore_links(saved_links)
+    if(!is.null(history_before)){dir.create(dirname(history_path),recursive=TRUE,showWarnings=FALSE);writeBin(history_before,history_path)}
     cat("Restored the latest App Admin snapshot. Restart the app normally.\n")
     return(invisible(NULL))
   }

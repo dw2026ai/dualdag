@@ -50,6 +50,25 @@ test_that("layout accepts a display-only key node from the spec", {
   expect_equal(saved[["ADSL.USUBJID"]]$x, 10)
 })
 
+test_that("USUBJID key notice skips only STUDYID 1 and USUBJID 2", {
+  p <- display_project()
+  A <- create_app(app_root, p$dir, 7988L, "display-token", load_config())
+  on.exit(shutdown_app(A), add = TRUE)
+  spec_path <- file.path(p$dir, "spec", "variable.csv")
+  notice_for <- function(rows) {
+    utils::write.csv(data.frame(Dataset = "ADSL", Variable = c("USUBJID", "STUDYID", "OTHER")[seq_along(rows)],
+      Label = "", Type = "Char", Length = 8, Key = rows, Source = "", Derivation = ""),
+      spec_path, row.names = FALSE, na = "")
+    from_json(display_call(A, "/api/state")$body)$datasets$ADSL$usubjid_key_notice
+  }
+  expect_identical(notice_for(c(2L, 1L)), "")
+  expect_identical(notice_for(c(1L, NA_integer_)), "")
+  expect_identical(notice_for(c(1L, 2L)), "")
+  expect_match(notice_for(c(3L, 1L)), "spec says 3", fixed = TRUE)
+  expect_match(notice_for(c(NA_integer_, 1L)), "spec says not a key", fixed = TRUE)
+  expect_match(notice_for(c(2L, NA_integer_, 1L)), "spec says 2", fixed = TRUE)
+})
+
 test_that("category endpoint counts typed values and flags discrepancies", {
   p <- display_project()
   A <- create_app(app_root, p$dir, 7988L, "display-token", load_config())

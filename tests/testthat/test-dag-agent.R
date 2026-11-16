@@ -117,6 +117,37 @@ test_that("lookup returns spec and graph only and ignores unknown ids", {
   expect_match(sys, "TASK: dag_ask", fixed = TRUE)
 })
 
+test_that("DAG edit normalization supports spec Key edits", {
+  expected <- list(op="edit_spec",file="variable.csv",dataset="ADSL",key="AGE",column="Key",value="2")
+  for (got in list(dag_normalize_changes(list(expected))[[1]],
+                   dag_normalize_changes(list(list(type="edit_spec",file="variable.csv",dataset="ADSL",key="AGE",column="Key",value="2")))[[1]],
+                   dag_normalize_changes(list(list(edit_spec=list(file="variable.csv",dataset="ADSL",key="AGE",column="Key",value="2"))))[[1]])) {
+    expect_identical(got$op,expected$op); expect_identical(got$column,expected$column)
+    expect_identical(got$value,expected$value)
+  }
+})
+
+test_that("key ordering uses the shared spec resolver", {
+  p <- adsl_project(); spec <- read_project_spec(p)
+  expect_identical(dataset_keys(spec,"ADSL"),c("USUBJID"))
+  expect_identical(layer_key_names(spec,"ADSL","*"),dataset_keys(spec,"ADSL"))
+})
+
+test_that("rejected and unknown DAG changes are reported in answer and card", {
+  p <- adsl_project()
+  old <- llm_reply_with_lookup
+  on.exit(assign("llm_reply_with_lookup",old,.GlobalEnv),add=TRUE)
+  assign("llm_reply_with_lookup",function(...)list(parsed=list(answer="I changed it.",changes=list(list(op="add_edge",from="ADSL.NOPE",to="ADSL.AGE")),correction=NULL),raw=list(model="stub"),usage=list()),.GlobalEnv)
+  rejected <- dag_ask(list(),p,"ADSL","make the change")
+  expect_match(rejected$answer,"was rejected",fixed=TRUE)
+  expect_match(rejected$answer,"Unknown node",fixed=TRUE)
+  expect_length(rejected$changes,0)
+  assign("llm_reply_with_lookup",function(...)list(parsed=list(answer="Done.",changes=list(list(op="mystery",value=1)),correction=NULL),raw=list(model="stub"),usage=list()),.GlobalEnv)
+  unknown <- dag_ask(list(),p,"ADSL","do it")
+  expect_match(unknown$answer,"unknown operation 'mystery'",fixed=TRUE)
+  expect_match(unknown$card[[1]]$text,"mystery",fixed=TRUE)
+})
+
 test_that("lookup stops after two rounds", {
   p <- adsl_project()
   box <- with_fake_llm(with_llm_log(
@@ -217,8 +248,8 @@ test_that("DAG replies apply atomically, edit specs, and undo the complete step"
   expect_false(identical(changed_spec,before_spec))
   changed_graph <- graph_txt(p)
   refused <- dag_ask(list(),p,"ADSL","do both")
-  expect_length(refused$changes,0L); expect_match(refused$answer,"node is unknown",fixed=TRUE)
-  expect_match(prompts[[4]],"VALIDATION_REFUSAL",fixed=TRUE); expect_match(prompts[[4]],"Unknown node",fixed=TRUE)
+  expect_length(refused$changes,0L); expect_match(refused$answer,"was rejected",fixed=TRUE)
+  expect_match(refused$answer,"Unknown node",fixed=TRUE)
   expect_identical(readBin(file.path(p$dir,"spec","variable.csv"),"raw",n=10000),changed_spec)
   expect_identical(graph_txt(p),changed_graph)
   expect_true(any(vapply(load_graph(p,"ADSL")$edges,function(e)e$from=="ADSL.AGE"&&e$to=="ADSL.TRTSDT",TRUE)))
@@ -231,7 +262,7 @@ test_that("DAG replies apply atomically, edit specs, and undo the complete step"
   saved_state <- read_json(file.path(snap[[1]],"state.json"))
   expect_identical(saved_state$nodes$ADSL$ADSL.AGE$level,"L3")
   undone <- dag_call(A,"/api/dag/undo","POST",list(dataset="ADSL"))
-  expect_equal(undone$status,200L)
+  expect_equal(undone$status,200L,info=as.character(undone$body))
   expect_identical(readBin(file.path(p$dir,"spec","variable.csv"),"raw",n=10000),before_spec)
   expect_identical(graph_txt(p),before_graph)
   expect_identical(get_status(A$project,"ADSL","ADSL.AGE")$level,before_status$level)
@@ -277,6 +308,102 @@ test_that("DAG route reloads child state after success and rejection", {
   for(i in seq_len(200L)) { later::run_now(); if(!is.null(box2$value))break; Sys.sleep(.025) }
   expect_equal(box2$value$status,502L)
   expect_identical(get_status(A$project,"ADSL","ADSL.AGE")$level,"L2")
+})
+
+test_that("DAG key edits write variable.csv Key and are undoable", {
+  p <- adsl_project(); original <- llm_chat
+  assign("llm_chat",function(...) list(text='{"answer":"Updated the dataset key.","changes":[{"op":"edit_spec","file":"variable.csv","dataset":"ADSL","key":"AGE","column":"Key","value":"2"}],"correction":null}',model="fixture"),.GlobalEnv)
+  on.exit(assign("llm_chat",original,.GlobalEnv),add=TRUE)
+  result <- dag_ask_job(p$dir,"ADSL","Make AGE a dataset key")
+  expect_length(result$changes,1L)
+  spec <- read_project_spec(p)
+  expect_identical(as.character(spec$variables$Key[spec$variables$Variable=="AGE"]),"2")
+  expect_identical(dataset_keys(spec,"ADSL"),c("USUBJID","AGE"))
+  A <- create_app(app_root,p$dir,7996L,"dag-key-undo",load_config()); on.exit(shutdown_app(A),add=TRUE)
+  undone <- dag_call(A,"/api/dag/undo","POST",list(dataset="ADSL"))
+  expect_equal(undone$status,200L)
+  restored <- read_project_spec(p)
+  expect_true(is.na(restored$variables$Key[restored$variables$Variable=="AGE"]) || !nzchar(as.character(restored$variables$Key[restored$variables$Variable=="AGE"])))
+})
+
+test_that("DAG applies colliding key edits as one validated spec batch", {
+  p <- adsl_project()
+  writeLines(c("Dataset,Variable,Label,Type,Length,Key,Source,Derivation",
+    "ADPPK,RECSEQ,Sequence,Num,8,1,,",
+    "ADPPK,STUDYID,Study,Char,20,,,",
+    "ADPPK,USUBJID,Subject,Char,20,,,",
+    "ADPPK,AFRLT,Relative,Num,8,,,",
+    "ADPPK,EVID,Event,Num,8,,,",
+    "ADPPK,CMT,Compartment,Num,8,,,"), file.path(p$dir,"spec","variable.csv"))
+  g <- make_graph("ADPPK", nodes=lapply(c("RECSEQ","STUDYID","USUBJID","AFRLT","EVID","CMT"), function(v) gn(paste0("ADPPK.",v))), edges=list())
+  save_graph(p,g)
+  sync_external(p)
+  original <- llm_chat
+  reply <- '{"answer":"Updated keys.","changes":[{"op":"edit_spec","file":"variable.csv","dataset":"ADPPK","key":"STUDYID","column":"Key","value":"1"},{"op":"edit_spec","file":"variable.csv","dataset":"ADPPK","key":"USUBJID","column":"Key","value":"2"},{"op":"edit_spec","file":"variable.csv","dataset":"ADPPK","key":"AFRLT","column":"Key","value":"3"},{"op":"edit_spec","file":"variable.csv","dataset":"ADPPK","key":"EVID","column":"Key","value":"4"},{"op":"edit_spec","file":"variable.csv","dataset":"ADPPK","key":"CMT","column":"Key","value":"5"},{"op":"edit_spec","file":"variable.csv","dataset":"ADPPK","key":"RECSEQ","column":"Key","value":""}],"correction":null}'
+  assign("llm_chat",function(...) list(text=reply,model="fixture"),.GlobalEnv)
+  on.exit(assign("llm_chat",original,.GlobalEnv),add=TRUE)
+  result <- dag_ask(list(),p,"ADPPK","Set the ordered keys")
+  expect_length(result$changes,6L)
+  final_vars <- read_project_spec(p)$variables
+  keyed <- final_vars[final_vars$Dataset=="ADPPK" & !is.na(final_vars$Key),]
+  expect_identical(keyed$Variable[order(keyed$Key)],c("STUDYID","USUBJID","AFRLT","EVID","CMT"))
+  expect_length(result$card,6L)
+})
+
+test_that("invalid final spec batches write nothing; manual spec edits validate once", {
+  p <- adsl_project(); writeLines("Dataset,PARAMCD,PARAM,Source,Derivation",file.path(p$dir,"spec","parameter.csv")); sync_external(p); original <- llm_chat
+  original_sync <- sync_external; sync_calls <- 0L
+  assign("sync_external",function(p) { sync_calls <<- sync_calls+1L; original_sync(p) },.GlobalEnv)
+  on.exit({assign("llm_chat",original,.GlobalEnv);assign("sync_external",original_sync,.GlobalEnv)},add=TRUE)
+  for (values in list(c("2",""),c("1","1"))) {
+    spec_paths <- file.path(p$dir,"spec",c("variable.csv","parameter.csv"))
+    before <- lapply(spec_paths,readBin,what="raw",n=10000)
+    before_state <- readBin(file.path(p$state_dir,"state.json"),"raw",n=100000)
+    edits <- list(list(op="edit_spec",file="variable.csv",dataset="ADSL",key="USUBJID",column="Key",value=values[[1]]),
+      list(op="edit_spec",file="variable.csv",dataset="ADSL",key="AGE",column="Key",value=values[[2]]))
+    expect_error(apply_dag_changes(p,"ADSL",edits),"Edited spec failed validation")
+    expect_identical(lapply(spec_paths,readBin,what="raw",n=10000),before)
+    expect_identical(readBin(file.path(p$state_dir,"state.json"),"raw",n=100000),before_state)
+  }
+  expect_equal(sync_calls,0L)
+  expect_true(apply_dag_changes(p,"ADSL",list(list(op="edit_spec",file="variable.csv",dataset="ADSL",key="AGE",column="Key",value="2")))$ok)
+  expect_equal(sync_calls,2L)
+  expect_identical(dataset_keys(read_project_spec(p),"ADSL"),c("USUBJID","AGE"))
+  res <- apply_dag_changes(p,"ADSL",list(
+    list(op="edit_spec",file="variable.csv",dataset="ADSL",key="USUBJID",column="Key",value="2"),
+    list(op="edit_spec",file="variable.csv",dataset="ADSL",key="AGE",column="Key",value="1")))
+  expect_length(res$spec_edits,2L)
+  expect_equal(sync_calls,4L)
+  final_vars <- read_project_spec(p)$variables
+  keyed <- final_vars[final_vars$Dataset=="ADSL" & !is.na(final_vars$Key),]
+  expect_identical(keyed$Variable[order(keyed$Key)],c("AGE","USUBJID"))
+})
+
+test_that("manual mixed spec and graph edits roll back on graph failures and undo together", {
+  p <- adsl_project(); sync_external(p)
+  spec_path <- file.path(p$dir,"spec","variable.csv")
+  state_path <- file.path(p$state_dir,"state.json")
+  graph_path_before <- graph_txt(p)
+  edit <- list(op="edit_spec",file="variable.csv",dataset="ADSL",key="AGE",column="Label",value="Changed")
+  before_spec <- readBin(spec_path,"raw",n=10000); before_state <- readBin(state_path,"raw",n=100000)
+  expect_error(apply_dag_changes(p,"ADSL",list(edit,list(op="add_edge",from="ADSL.AGE",to="ADSL.USUBJID"))),"cycle")
+  expect_identical(readBin(spec_path,"raw",n=10000),before_spec)
+  expect_identical(readBin(state_path,"raw",n=100000),before_state)
+  original_save <- save_graph
+  assign("save_graph",function(...) stop("simulated graph save failure"),.GlobalEnv)
+  on.exit(assign("save_graph",original_save,.GlobalEnv),add=TRUE)
+  expect_error(apply_dag_changes(p,"ADSL",list(edit,list(op="add_edge",from="ADSL.USUBJID",to="ADSL.TRTSDT"))),"simulated graph save failure")
+  expect_identical(readBin(spec_path,"raw",n=10000),before_spec)
+  expect_identical(readBin(state_path,"raw",n=100000),before_state)
+  assign("save_graph",original_save,.GlobalEnv)
+  A <- create_app(app_root,p$dir,7984L,"manual-spec-undo",load_config()); on.exit(shutdown_app(A),add=TRUE)
+  result <- apply_dag_changes(p,"ADSL",list(edit,list(op="add_edge",from="ADSL.USUBJID",to="ADSL.TRTSDT",evidence="manual mixed edit")))
+  expect_true(result$ok)
+  expect_identical(read_project_spec(p)$variables$Label[read_project_spec(p)$variables$Variable=="AGE"],"Changed")
+  undone <- dag_call(A,"/api/dag/undo","POST",list(dataset="ADSL"))
+  expect_equal(undone$status,200L,info=as.character(undone$body))
+  expect_identical(readBin(spec_path,"raw",n=10000),before_spec)
+  expect_identical(graph_txt(p),graph_path_before)
 })
 
 test_that("DAG undo reverses each graph edit as one stack step and preserves statuses changed later", {

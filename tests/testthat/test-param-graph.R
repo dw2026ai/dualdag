@@ -343,7 +343,7 @@ test_that("successful Parameter DAG extraction seeds the grouped Variable DAG sk
   expect_identical(vapply(graph$layers, `[[`, "", "paramcd"), c("CARRY_OVER", "DER"))
   carry <- graph$layers[[1]]
   expect_identical(carry$members_parameters, list("CO1", "CO2"))
-  expect_setequal(graph$layer_keys$CARRY_OVER, c("USUBJID", "PARAMCD", "VISIT"))
+  expect_setequal(graph$layer_keys$CARRY_OVER, c("USUBJID", "PARAMCD"))
   expect_true("X.AVAL@CARRY_OVER" %in% carry$members)
   expect_false(any(grepl("@(CO1|CO2)$", vapply(graph$nodes, `[[`, "", "id"))))
   expect_null(graph$carry_over_regenerate_required)

@@ -380,7 +380,7 @@ claude_cli_chat <- function(cfg, system, user) {
   prompt_path <- file.path(wd, "prompt.txt")
   # Keep system instructions out of argv and in their own UTF-8 file. Claude's
   # help advertises --system-prompt[-file]; this avoids Windows' ~32K argv cap.
-  args <- c("-p", "--output-format", "json", "--model", model, "--tools", "",
+  args <- c("-p", "--output-format", "stream-json", "--verbose", "--model", model, "--tools", "",
             "--no-session-persistence", "--strict-mcp-config")
   if (nzchar(sys)) {
     system_path <- file.path(wd, "system-prompt.txt")
@@ -394,9 +394,8 @@ claude_cli_chat <- function(cfg, system, user) {
   timeout <- llm_timeout(cfg)
   launch <- cli_process_command(bin, args)
   res <- tryCatch(
-    processx::run(launch$command, launch$args, wd = wd, stdin = prompt_path, timeout = timeout,
-                  error_on_status = FALSE, encoding = "UTF-8",
-                  env = cli_child_env(cfg, c("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"))),
+    cli_run_polled(launch$command, launch$args, wd = wd, stdin = prompt_path, timeout = timeout,
+                  env = cli_child_env(cfg, c("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")), on_line = cli_emit_line_event),
     error = function(e) e
   )
   if (inherits(res, "error")) {
@@ -410,7 +409,11 @@ claude_cli_chat <- function(cfg, system, user) {
   if (length(status) == 1L && !is.na(status) && status < 0L) {
     stop("Claude Code CLI timed out after ", timeout, " seconds.", call. = FALSE)
   }
-  j <- tryCatch(jsonlite::fromJSON(res$stdout, simplifyVector = FALSE), error = function(e) NULL)
+  stream_lines <- strsplit(res$stdout, "\n", fixed = TRUE)[[1]]
+  stream <- lapply(stream_lines, function(ln) tryCatch(jsonlite::fromJSON(ln, simplifyVector = FALSE), error = function(e) NULL))
+  j <- NULL
+  for (evt in stream) if (is.list(evt) && !is.null(evt$result)) j <- evt
+  if (is.null(j)) j <- tryCatch(jsonlite::fromJSON(res$stdout, simplifyVector = FALSE), error = function(e) NULL)
   out <- trimws(paste(c(res$stdout, res$stderr), collapse = "\n"))
   if (!is.list(j) || is.null(j$result) || isTRUE(j$is_error) || !identical(status, 0L)) {
     detail <- if (is.list(j) && !is.null(j$result)) as.character(j$result)[1] else out
@@ -428,7 +431,7 @@ claude_cli_chat <- function(cfg, system, user) {
 }
 
 # Local `codex` CLI (ChatGPT login). No API key. Empty model keeps the CLI default.
-codex_cli_models <- function() c("gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna")
+codex_cli_models <- function() c("gpt-6.1-terra", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna")
 
 # Pull a human error string out of Codex JSONL. Ignores tracing logs.
 codex_error_text <- function(stdout, stderr) {
@@ -515,9 +518,8 @@ codex_cli_chat <- function(cfg, system, user) {
   timeout <- llm_timeout(cfg)
   launch <- cli_process_command(bin, args)
   res <- tryCatch(
-    processx::run(launch$command, launch$args, wd = wd, stdin = prompt_path, timeout = timeout,
-                  error_on_status = FALSE, encoding = "UTF-8",
-                  env = cli_child_env(cfg, c("OPENAI_API_KEY", "CODEX_API_KEY"))),
+    cli_run_polled(launch$command, launch$args, wd = wd, stdin = prompt_path, timeout = timeout,
+                  env = cli_child_env(cfg, c("OPENAI_API_KEY", "CODEX_API_KEY")), on_line = cli_emit_line_event),
     error = function(e) e
   )
   if (inherits(res, "error")) {
@@ -753,4 +755,43 @@ fake_llm_reply <- function(system, user) {
     return(json_text(list(ok = FALSE, message = paste("Unknown fake task:", task))))
   }
   get(fn, mode = "function", inherits = TRUE)(system, user)
+}
+# Run a CLI while draining both pipes. A caller may install a display-only
+# callback; complete stdout/stderr are still returned for the existing parsers.
+cli_run_polled <- function(command, args, wd, stdin, timeout, env, on_line = NULL) {
+  proc <- processx::process$new(command, args, wd = wd, stdin = stdin,
+    stdout = "|", stderr = "|", env = env, encoding = "UTF-8", cleanup = TRUE)
+  out <- character(); err <- character(); started <- Sys.time(); last_tick <- 0L
+  repeat {
+    proc$poll_io(100)
+    a <- proc$read_output_lines(); b <- proc$read_error_lines()
+    if (length(a)) { out <- c(out, a); if (is.function(on_line)) for (ln in a) try(on_line(ln), silent = TRUE) }
+    if (length(b)) err <- c(err, b)
+    if (!proc$is_alive()) break
+    elapsed <- as.integer(difftime(Sys.time(), started, units = "secs"))
+    if (elapsed >= timeout) { proc$kill(); proc$wait(); stop("process timed out", call. = FALSE) }
+    if (elapsed > last_tick && is.function(on_line) && isTRUE(getOption("dualdag.progress_wait_events", FALSE))) {
+      last_tick <- elapsed
+      if (elapsed %% 10L == 0L) try(on_line(sprintf("waiting for model… (%ds)", elapsed)), silent = TRUE)
+    }
+  }
+  a <- proc$read_all_output_lines(); b <- proc$read_all_error_lines()
+  out <- c(out, a); err <- c(err, b)
+  list(status = proc$get_exit_status(), stdout = paste(out, collapse = "\n"), stderr = paste(err, collapse = "\n"))
+}
+
+cli_emit_line_event <- function(line) {
+  cb <- getOption("dualdag.progress_event_callback")
+  if (!is.function(cb)) return(invisible())
+  j <- tryCatch(jsonlite::fromJSON(line, simplifyVector = FALSE), error = function(e) NULL)
+  if (!is.list(j)) return(invisible())
+  item <- j$item %||% j$message %||% j
+  if (identical(as.character(item$type %||% "")[1], "content_block_start")) item <- item$content_block %||% item
+  typ <- as.character(item$type %||% j$type %||% "")[1]
+  txt <- ""
+  if (typ %in% c("reasoning_summary", "reasoning", "thinking", "thinking_summary")) txt <- item$text %||% paste(unlist(item$summary %||% "Thinking"), collapse = " ")
+  else if (typ %in% c("command_execution", "tool_use", "tool_call", "file_read")) txt <- paste("Using", item$name %||% item$tool_name %||% typ)
+  else if (typ %in% c("agent_message", "text", "content_block_delta")) txt <- item$text %||% item$delta$text %||% ""
+  if (length(txt) && nzchar(as.character(txt)[1])) cb(substr(as.character(txt)[1], 1, 160))
+  invisible()
 }

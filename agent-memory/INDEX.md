@@ -1,0 +1,12 @@
+- [Primary inputs](primary-inputs.md) — Primary source frames are filtered while inherited work frames may be wider.
+- [Validation independence](validation-independence.md) — Validation has broad inputs and gets only its own side's context.
+- [Keys](keys.md) — Dataset and layer keys follow distinct precedence and ordering rules.
+- [Layered datasets](layered-datasets.md) — Parameter layers run in dependency order with carry-over groups.
+- [DAG and lineage](dag-lineage.md) — The graph is the dependency source; visible lineage follows prompt lineage selection.
+- [DAG agent edits](dag-agent-edits.md) — Only validated structured changes mutate the graph.
+- [Self-review](self-review.md) — Each side reviews generated code and may rewrite it once.
+- [Batch and Full Run](batch-full-run.md) — Batch generation and whole-dataset execution have separate order and stop rules.
+- [Agent context](agent-context.md) — Per-variable coder context resets and validation gets a bounded done list.
+- [Local access](local-access.md) — The app binds locally and protects API requests with a URL token.
+- [Changing rules](how-to-change-rules.md) — Explain the existing rule before changing it and record the change.
+- [Model tiers](model-tiers.md) — High-end and low-end model naming, storage keys, and provider defaults.

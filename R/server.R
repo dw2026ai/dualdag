@@ -157,6 +157,8 @@ extract_job <- function(project_dir, dataset) {
 run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeout, description = NULL) {
   if (exists("su_edited_path",mode="function")) unlink(su_edited_path(project_dir,dataset,node_id,side))
   session_complete <- FALSE
+  progress_complete <- FALSE
+  on.exit(if (!progress_complete) try(progress_finish(project_dir, dataset, node_id, side, "Job failed."), silent = TRUE), add = TRUE)
   on.exit(if (!session_complete && exists("coder_session_set_status",mode="function"))
     coder_session_set_status(project_dir,dataset,node_id,side,"failed"), add=TRUE)
   cfg <- with_cfg()
@@ -193,8 +195,26 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
   }, "")
   notes <- if (exists("read_side_notes", mode = "function")) read_side_notes(project_dir, dataset, node_id, side) else list()
   sdir <- file.path(node_run_dir(project_dir, dataset, node_id), side)
+  lineage_inputs <- tryCatch({
+    lin <- lineage_context(spec, graph, node, project_dir, side, job_catalog(project_dir))
+    refs <- c(lin$prompt_source_refs %||% lin$source_refs %||% character(),
+              setdiff(lin$prompt_ids %||% lin$ids %||% character(), lin$target_id %||% character()))
+    unique(as.list(as.character(refs[nzchar(as.character(refs))])))
+  }, error = function(e) list())
+  progress_set_step(project_dir, dataset, node_id, side, "inputs", lineage_inputs)
   if (exists("coder_window_reset", mode = "function")) coder_window_reset(project_dir, dataset, node_id, side)
   if (exists("coder_window_event", mode = "function")) coder_window_event(project_dir, dataset, node_id, side, "Generation started")
+  progress_set_step(project_dir, dataset, node_id, side, "writing")
+  old_progress_callback <- getOption("dualdag.progress_event_callback")
+  old_wait_events <- getOption("dualdag.progress_wait_events")
+  options(dualdag.progress_event_callback = function(line) {
+    secret <- as.character(cfg$api_key %||% "")[1]
+    if (nzchar(secret)) line <- gsub(secret, "[redacted]", as.character(line)[1], fixed = TRUE)
+    progress_event(project_dir, dataset, node_id, side, line)
+  })
+  options(dualdag.progress_wait_events = TRUE)
+  on.exit(options(dualdag.progress_event_callback = old_progress_callback), add = TRUE)
+  on.exit(options(dualdag.progress_wait_events = old_wait_events), add = TRUE)
   current <- read_text(file.path(sdir, "code.R"))
   old <- llm_log_scope(project_dir, "generate", node_id, side)
   on.exit(options(dualdag.llm_log = old), add = TRUE)
@@ -205,6 +225,7 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
     error = function(e) e
   )
   if (inherits(gen, "error")) {
+    progress_finish(project_dir, dataset, node_id, side, conditionMessage(gen))
     stop(gen)
   }
   parsed <- normalize_generated(gen)
@@ -217,6 +238,7 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
                file.path(sdir, "code_note.json"))
   }
   if (exists("coder_window_event", mode = "function")) coder_window_event(project_dir, dataset, node_id, side, "Program run started")
+  progress_set_step(project_dir, dataset, node_id, side, "running")
   unlink(file.path(sdir,"log.txt"))
   ran <- run_side(project_dir, dataset, node, side, parsed$code, timeout,
                   graph = graph, spec = spec, description = description %||% parsed$description)
@@ -235,6 +257,7 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
       if (exists("coder_window_event", mode = "function")) coder_window_event(project_dir, dataset, node_id, side, "Self-review started", if (retry) "retry" else NULL)
       progress <- review_progress_path(project_dir, dataset, node_id, side)
       write_text("reviewing", progress)
+      progress_set_step(project_dir, dataset, node_id, side, "reviewing")
       on.exit(unlink(progress), add = TRUE)
       old_review <- llm_log_scope(project_dir, "self_review", node_id, side)
       on.exit(options(dualdag.llm_log = old_review), add = TRUE)
@@ -251,6 +274,7 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
         !is_missing_r_package_error(ran$error) &&
         !grepl("disallowed package|not allowed", as.character(ran$error %||% ""), ignore.case = TRUE)) {
       auto_rewritten <- TRUE
+      progress_set_step(project_dir, dataset, node_id, side, "rewriting")
       first_error <- as.character(ran$error %||% "Side failed")[1]
       error_review <- call_review(FALSE, first_error)
       if (exists("coder_window_event", mode = "function")) coder_window_event(project_dir, dataset, node_id, side, "Rewrite started", "program error with self-review")
@@ -263,6 +287,7 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
         if (isTRUE(graph$layered) && identical(node$kind,"param_variable")) write_json(list(approach=handling_approach_text(retry_parsed$approach)),file.path(sdir,"approach.json"))
         write_text(retry_parsed$code, file.path(sdir, "code.R"))
         if (exists("coder_window_event", mode = "function")) coder_window_event(project_dir, dataset, node_id, side, "Program run started", "rewrite")
+        progress_set_step(project_dir, dataset, node_id, side, "rerunning")
         unlink(file.path(sdir,"log.txt"))
         retry_run <- tryCatch(run_side(project_dir, dataset, node, side, retry_parsed$code, timeout,
           graph = graph, spec = spec, description = description %||% retry_parsed$description),
@@ -310,6 +335,7 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
       wp <- work_path(project_dir, dataset, side); work_backup <- tempfile("self-review-work-")
       had_work <- file.exists(wp); if (had_work) file.copy(wp, work_backup)
       if (exists("coder_window_event", mode = "function")) coder_window_event(project_dir, dataset, node_id, side, "Rewrite started", "self-review")
+      progress_set_step(project_dir, dataset, node_id, side, "rewriting")
       retry_gen <- tryCatch(generate_side(cfg, side, spec, graph, node, ups, user_instruction = instruction,
         catalog = job_catalog(project_dir), project = project_dir, current_code = parsed$code,
         notes = notes, self_review = list(code = parsed$code, approach=parsed$approach, issues = review$issues)), error = function(e) e)
@@ -320,6 +346,7 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
         if (isTRUE(graph$layered) && identical(node$kind,"param_variable")) write_json(list(approach=handling_approach_text(retry_parsed$approach)),file.path(sdir,"approach.json"))
         write_text(retry_parsed$code, file.path(sdir, "code.R"))
         if (exists("coder_window_event", mode = "function")) coder_window_event(project_dir, dataset, node_id, side, "Program run started", "rewrite")
+        progress_set_step(project_dir, dataset, node_id, side, "rerunning")
         unlink(file.path(sdir,"log.txt"))
         retry_run <- tryCatch(run_side(project_dir, dataset, node, side, retry_parsed$code, timeout,
           graph = graph, spec = spec, description = description %||% retry_parsed$description), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
@@ -357,6 +384,8 @@ run_side_job <- function(project_dir, dataset, node_id, side, instruction, timeo
   }
   if (exists("coder_session_set_status", mode="function")) coder_session_set_status(project_dir,dataset,node_id,side,if(isTRUE(ran$ok)) "success" else "failed")
   session_complete <- TRUE
+  progress_finish(project_dir, dataset, node_id, side, if (isTRUE(ran$ok)) NULL else ran$error %||% "Program failed.")
+  progress_complete <- TRUE
   list(code = parsed$code, same_source = isTRUE(parsed$same_source), run = ran, review = review)
 }
 
@@ -386,10 +415,16 @@ dag_ask_job <- function(project_dir, dataset, message, paramcd=NULL, selected=NU
 }
 
 compare_job <- function(project_dir, dataset, node_id) {
+  for (side in c("primary", "validation")) {
+    rec <- progress_read(project_dir, dataset, node_id, side)
+    if (!is.null(rec)) progress_set_step(project_dir, dataset, node_id, side, "compare")
+  }
   spec <- read_project_spec_dir(project_dir)
   node <- graph_node(load_graph(project_dir, dataset), node_id)
   if (is.null(node)) node <- default_node(node_id)
-  compare_node(project_dir, dataset, node, dataset_keys(spec, dataset))
+  ans <- compare_node(project_dir, dataset, node, dataset_keys(spec, dataset))
+  for (side in c("primary", "validation")) if (!is.null(progress_read(project_dir, dataset, node_id, side))) progress_finish(project_dir, dataset, node_id, side)
+  ans
 }
 
 qc_job <- function(project_dir, dataset, node_id) {
@@ -666,7 +701,11 @@ state_payload <- function(A) {
     ids <- dataset_node_ids(p, spec, ds)
     nodes <- empty_named()
     check_issues <- if (is.null(chk)) list() else chk$issues %||% list()
-    for (id in ids) nodes[[id]] <- node_public(p, g, ds, id, check_issues)
+    for (id in ids) {
+      nodes[[id]] <- node_public(p, g, ds, id, check_issues)
+      nodes[[id]]$progress <- list(primary = progress_read(p, ds, id, "primary"),
+                                   validation = progress_read(p, ds, id, "validation"))
+    }
     groups <- empty_named()
     if (!is.null(g)) for (grp in g$groups %||% list()) {
       if (!is.list(grp)) next
@@ -680,8 +719,7 @@ state_payload <- function(A) {
     } else list(turns = list(), corrections = list())
     dag_pub$manual_edit_count <- length(dag_pub$corrections %||% list())
     param_mem <- tryCatch(dag_agent_read(p, ds), error = function(e) list())
-    key_overrides <- if (exists("layer_keys_read", mode="function")) layer_keys_read(p,ds) else list()
-    param_manual_edit_count <- length(param_mem$param_corrections %||% list()) + length(key_overrides)
+    param_manual_edit_count <- length(param_mem$param_corrections %||% list())
     dag_undo <- if (fn_exists("dag_undo_public")) tryCatch(dag_undo_public(p, ds), error = function(e) list(count = 0L, label = NULL)) else list(count = 0L, label = NULL)
     if (!is.null(g) && exists("extract_reply_read", mode="function")) {
       saved_extract <- tryCatch(extract_reply_read(p,ds),error=function(e)NULL)
@@ -693,7 +731,18 @@ state_payload <- function(A) {
       layer_codes <- vapply(as_records(g$layers), function(x) toupper(x$paramcd %||% ""), "")
       g$carry_over_regenerate_required <- length(carries) > 0L && !"CARRY_OVER" %in% layer_codes && any(carries %in% layer_codes)
     }
+    legacy_keys <- tryCatch(layer_keys_read(p,ds),error=function(e)list())
+    legacy_text <- if(length(legacy_keys)) paste(vapply(names(legacy_keys),function(pc)paste0(if(pc=="*")"dataset"else paste0("parameter ",pc),": ",paste(unlist(legacy_keys[[pc]]),collapse=", ")),""),collapse="; ") else ""
+    vars_for_keys <- if(!is.null(spec))spec_vars(spec,ds)else data.frame()
+    usub_row <- if(nrow(vars_for_keys))which(toupper(vars_for_keys$Variable)=="USUBJID")else integer()
+    usub_key <- if(length(usub_row))suppressWarnings(as.integer(vars_for_keys$Key[usub_row[[1]]]))else NA_integer_
+    study_row <- if(nrow(vars_for_keys))which(toupper(vars_for_keys$Variable)=="STUDYID")else integer()
+    study_key <- if(length(study_row))suppressWarnings(as.integer(vars_for_keys$Key[study_row[[1]]]))else NA_integer_
+    conventional_cdisc_keys <- length(usub_row)>0L && !is.na(usub_key) &&
+      (usub_key==1L || (usub_key==2L && length(study_row)>0L && !is.na(study_key) && study_key==1L))
     datasets[[ds]] <- list(graph = g, reextract_required = dataset_reextract_required(spec,ds,g), layout = load_layout(p, ds), check = if (is.null(g)) NULL else list(issues = check_issues, order = ord),
+                           legacy_key_notice = legacy_text,
+                           usubjid_key_notice = if(!conventional_cdisc_keys) paste0("USUBJID is always the first key; spec says ",if(!length(usub_row)||is.na(usub_key))"not a key"else as.character(usub_key),".") else "",
                            nodes = nodes, groups = groups, dag = dag_pub,
                            dag_undo = dag_undo,
                            parameter_graph = list(manual_edit_count = param_manual_edit_count))
@@ -842,7 +891,7 @@ start_layer_extract <- function(A, ds, paramcd, wait=TRUE) {
   if (inherits(classification, "error")) return(err_resp(conditionMessage(classification), 500L))
   carry_group <- toupper(vapply(Filter(function(x) identical(x$classification,"carry_over"), classification$parameters %||% list()), function(x) x$paramcd, ""))
   if (is.null(current) || !isTRUE(current$layered) || !pc %in% vapply(current$layers %||% list(),function(x)x$paramcd,""))
-    current <- graph_skeleton(spec, ds, layer_keys_read(A$project,ds), carry_group)
+    current <- graph_skeleton(spec, ds, carry_members=carry_group)
   layer_record <- Filter(function(x) identical(toupper(x$paramcd %||% ""),pc), as_records(current$layers %||% list()))
   is_group <- identical(pc,"CARRY_OVER")
   members <- if (is_group) carry_group else if (length(layer_record)) toupper(flat_chr(layer_record[[1]]$members_parameters)) else pc
@@ -1215,13 +1264,49 @@ handle_api <- function(A, req, path, method, q) {
   POST <- identical(method, "POST")
   if (POST && isTRUE(A$admin_active) && !path %in% c("/api/admin/stop", "/api/admin/chat"))
     return(err_resp("Refused while an App Admin turn is running.",409L))
+  if (path == "/api/admin/enabled" && identical(method,"GET"))
+    return(json_resp(list(enabled=isTRUE(A$cfg$admin_agent_enabled))))
+  if (path == "/api/admin/enabled" && POST) {
+    b <- read_body(req); value <- b$enabled
+    if (length(value)!=1L || is.na(value) || !is.logical(value)) return(err_resp("enabled must be a boolean.",400L))
+    A$cfg$admin_agent_enabled <- value; save_config(A$cfg)
+    return(json_resp(list(ok=TRUE,enabled=value)))
+  }
+  if (path == "/api/admin/history" && identical(method,"GET"))
+    return(json_resp(list(session=A$admin_session,turns=A$admin_session$turns %||% list())))
+  if (path == "/api/admin/snapshots" && identical(method,"GET"))
+    return(json_resp(list(snapshots=admin_snapshot_list(p$dir))))
+  if (path == "/api/admin/restore" && POST) {
+    if (length(A$jobs)||batch_running(A)||isTRUE(A$admin_active)) return(err_resp("Cannot restore while work is running.",409L))
+    b<-read_body(req); sid<-as.character(b$snapshot_id %||% "")[1]
+    before_restore<-admin_snapshot(A$app_dir,p$dir,prune=FALSE)
+    res<-tryCatch({admin_restore_snapshot(A$app_dir,p$dir,sid); list(ok=TRUE,snapshot_id=sid,undo_snapshot_id=before_restore)},error=function(e)e)
+    if(!inherits(res,"error")) {
+      try(admin_append_log(p$dir,paste("Restore snapshot",sid),"Snapshot restored",character(),sid,"restore",NULL,NULL),silent=TRUE)
+      try(admin_finish_snapshot(A$app_dir,p$dir,before_restore),silent=TRUE)
+    }
+    admin_prune_snapshots(p$dir,preserve=before_restore)
+    if(inherits(res,"error"))return(err_resp(conditionMessage(res),400L))
+    A$project<-admin_refresh_project(A)
+    return(json_resp(res))
+  }
   if (path == "/api/admin/state" && identical(method, "GET")) {
     if (is.null(A$admin_cli_status_cache) || as.numeric(Sys.time())-A$admin_cli_status_cache$time>30) {
       A$admin_cli_status_cache <- list(time=as.numeric(Sys.time()),values=list(
         claude=tryCatch(admin_cli_status("claude_cli"),error=function(e)list(installed=FALSE,logged_in=FALSE,hint="Unavailable.")),
-        codex=tryCatch(admin_cli_status("codex_cli"),error=function(e)list(installed=FALSE,logged_in=FALSE,hint="Unavailable."))))
+        codex=tryCatch(admin_cli_status("codex_cli"),error=function(e)list(installed=FALSE,logged_in=FALSE,hint="Unavailable.")),
+        grok=tryCatch(admin_cli_status("grok_cli"),error=function(e)list(installed=FALSE,logged_in=NULL,hint="Unavailable."))))
     }
     statuses <- A$admin_cli_status_cache$values
+    statuses$claude$model <- if (identical(A$cfg$provider, "claude_cli")) A$cfg$strong_model else config_model_tiers("claude_cli")$high
+    statuses$codex$model <- if (identical(A$cfg$provider, "codex_cli")) A$cfg$strong_model else config_model_tiers("codex_cli")$high
+    statuses$grok$model <- if (identical(A$cfg$provider, "grok_cli")) A$cfg$strong_model else config_model_tiers("grok_cli")$high
+    api_key_available <- nzchar(get_api_key()$key)
+    for (api_provider in admin_api_providers()) {
+      api_model <- admin_api_model_for_provider(A$cfg,api_provider)
+      statuses[[api_provider]] <- list(available=api_key_available,configured=api_key_available,provider=api_provider,model=api_model,
+        hint=if (api_key_available) "API key configured." else "Configure an API key in Settings.")
+    }
     return(json_resp(list(session=A$admin_session, status=statuses, active=isTRUE(A$admin_active), notice="App Admin can change this app and this project without asking. It is told to stay inside them, but this is not enforced. Changes outside those roots are not detected. You are responsible for your system.")))
   }
   if (path == "/api/admin/new" && POST) {
@@ -1240,6 +1325,7 @@ handle_api <- function(A, req, path, method, q) {
     res <- tryCatch(admin_undo(A$app_dir,p$dir),error=function(e)e)
     if (inherits(res,"error")) return(err_resp(conditionMessage(res),409L))
     if (!isTRUE(res$ok)) return(json_resp(res))
+    try(admin_append_log(p$dir,"Undo App Admin turn","Restored the last App Admin snapshot.",unlist(res$files),"","undo",NULL,NULL),silent=TRUE)
     A$project <- admin_refresh_project(A)
     res$flags <- admin_change_flags(res$files)
     res$notice <- if(nzchar(res$notice %||% ""))res$notice else "Undo restored the last snapshot."
@@ -1256,21 +1342,33 @@ handle_api <- function(A, req, path, method, q) {
     return(json_resp(res))
   }
   if (path == "/api/admin/chat" && POST) {
+    if (!isTRUE(A$cfg$admin_agent_enabled)) return(err_resp("App Admin is disabled. Enable it in Settings before starting a turn.",403L))
     if (length(A$jobs) || batch_running(A) || isTRUE(A$admin_active)) return(err_resp("App Admin is unavailable while a job or batch is running.",409L))
     b <- read_body(req); provider <- as.character(b$provider %||% "")[1]
-    if (!provider %in% c("claude","codex")) return(err_resp("Choose Claude Code or Codex.",400L))
+    if (!provider %in% c("claude","codex","grok",admin_api_providers())) return(err_resp("Choose a configured App Admin CLI or API provider.",400L))
     message <- trimws(as.character(b$message %||% "")[1]); if (!nzchar(message)) return(err_resp("message is required.",400L))
-    cli_provider <- if(provider=="claude") "claude_cli" else "codex_cli"
-    st <- tryCatch(admin_cli_status(cli_provider),error=function(e)list(installed=FALSE,logged_in=FALSE))
-    if (!isTRUE(st$installed) || !isTRUE(st$logged_in)) return(err_resp("That CLI is not installed and logged in.",400L))
+    is_api <- provider %in% admin_api_providers()
+    if (is_api) {
+      if (!nzchar(get_api_key()$key)) return(err_resp("Configure an API key in Settings before using an API provider.",400L))
+      if (!nzchar(admin_api_model_for_provider(A$cfg,provider))) return(err_resp("Set a model in Settings before using App Admin.",400L))
+    } else {
+      cli_provider <- switch(provider,claude="claude_cli",codex="codex_cli",grok="grok_cli")
+      st <- tryCatch(admin_cli_status(cli_provider),error=function(e)list(installed=FALSE,logged_in=FALSE))
+      if (!isTRUE(st$installed) || (!identical(provider,"grok") && !isTRUE(st$logged_in))) return(err_resp("That CLI is not installed and logged in.",400L))
+    }
     prev <- A$admin_session
     sessions <- prev$sessions %||% list()
     sid <- as.character(sessions[[provider]] %||% if (identical(prev$provider,provider)) prev$session_id %||% "" else "")
+    api_histories <- prev$api_histories %||% list()
+    api_history <- if (is_api) api_histories[[provider]] %||% list() else list()
     snapshot_id <- admin_snapshot(A$app_dir,p$dir)
     before_manifest <- admin_manifest(A$app_dir,p$dir)
     A$admin_turn <- list(snapshot_id=snapshot_id,before=before_manifest,previous=prev,provider=provider,message=message)
     A$admin_active <- TRUE; A$admin_stop <- FALSE; jid <- job_start(A,"app-admin")
-    pr <- launch(A,"app_admin_turn_job",list(app_dir=A$app_dir,project=p$dir,provider=provider,prompt=message,session_id=sid),630,tracker=A$admin_procs)
+    high_model <- if (is_api) admin_api_model_for_provider(A$cfg,provider) else if (identical(A$cfg$provider, cli_provider)) A$cfg$strong_model else config_model_tiers(cli_provider)$high
+    timeout <- if (is_api) max(630,as.numeric(A$cfg$llm_timeout_s %||% 180)*40+60) else 630
+    pr <- launch(A,"app_admin_turn_job",list(app_dir=A$app_dir,project=p$dir,provider=provider,prompt=message,session_id=sid,
+      high_model=high_model,history=api_history),timeout,tracker=A$admin_procs)
     return(remember(A,jid,promises::then(pr,onFulfilled=function(ans){
       # Capture the CLI's file changes before reopening the project performs
       # normal synchronization writes to state.json.
@@ -1278,27 +1376,46 @@ handle_api <- function(A, req, path, method, q) {
       admin_refresh_project(A)
       admin_finish_snapshot(A$app_dir,p$dir,snapshot_id)
       ans$changed_files <- as.list(changed)
+      ans$snapshot <- admin_snapshot_metadata(p$dir,snapshot_id)
       flags <- admin_change_flags(changed)
       ans$refresh <- flags$refresh; ans$restart <- flags$restart; ans$relaunch <- flags$relaunch
       ans$flags <- flags
       ans$notice <- admin_diff_notice(changed)
-      ans$turns <- c(prev$turns %||% list(),list(list(role="user",text=message),list(role="assistant",text=ans$reply %||% "",changed_files=ans$changed_files %||% list(),actions=ans$actions %||% list(),notice=ans$notice,refresh=ans$refresh,restart=ans$restart,relaunch=ans$relaunch,flags=flags,usage=ans$usage,model=ans$model)))
+      if (isTRUE(ans$snapshot$data_excluded)) ans$notice<-paste(trimws(paste(ans$notice %||% "", "Project exceeds 500 MB; snapshot omitted data/.",sep=" ")))
+      ans$turns <- c(prev$turns %||% list(),list(list(role="user",text=message),list(role="assistant",text=ans$reply %||% "",changed_files=ans$changed_files %||% list(),snapshot=ans$snapshot,actions=ans$actions %||% list(),notice=ans$notice,refresh=ans$refresh,restart=ans$restart,relaunch=ans$relaunch,flags=flags,usage=ans$usage,model=ans$model)))
       sessions[[provider]] <- ans$session_id
-      A$admin_session <- list(provider=provider,session_id=ans$session_id,sessions=sessions,turns=tail(ans$turns,40L),last_notice=ans$notice,last_notice_flags=flags); write_json(A$admin_session,admin_session_path(p$dir))
+      if (is_api) api_histories[[provider]] <- ans$history %||% api_history
+      A$admin_session <- list(provider=provider,session_id=ans$session_id,sessions=sessions,api_histories=api_histories,turns=tail(ans$turns,40L),last_notice=ans$notice,last_notice_flags=flags); write_json(A$admin_session,admin_session_path(p$dir))
+      try(admin_append_log(p$dir,message,ans$reply %||% "",changed,snapshot_id,provider,ans$model,ans$usage),silent=TRUE)
+      try(admin_finish_snapshot(A$app_dir,p$dir,snapshot_id),silent=TRUE)
       A$admin_turn <- NULL
       A$admin_active <- FALSE; job_finish(A,jid); json_resp(ans)
     },onRejected=function(e){
       changed <- admin_changed(before_manifest,admin_manifest(A$app_dir,p$dir))
       admin_refresh_project(A); try(admin_finish_snapshot(A$app_dir,p$dir,snapshot_id),silent=TRUE)
       failed <- if(isTRUE(A$admin_stop)) "Stopped." else paste("Turn failed:",conditionMessage(e))
+      snapshot_meta <- tryCatch(admin_snapshot_metadata(p$dir,snapshot_id),error=function(e)list())
+      if (isTRUE(snapshot_meta$data_excluded)) failed<-paste(failed,"Project exceeds 500 MB; snapshot omitted data/.")
       flags <- admin_change_flags(changed)
       turns <- c(prev$turns %||% list(),list(list(role="user",text=message),list(role="assistant",text=failed,changed_files=as.list(changed),actions=list(),failed=TRUE,notice=admin_diff_notice(changed),flags=flags)))
-      A$admin_session <- list(provider=provider,session_id=sid,sessions=sessions,turns=tail(turns,40L),last_notice=admin_diff_notice(changed),last_notice_flags=flags); write_json(A$admin_session,admin_session_path(p$dir))
+      A$admin_session <- list(provider=provider,session_id=sid,sessions=sessions,api_histories=api_histories,turns=tail(turns,40L),last_notice=admin_diff_notice(changed),last_notice_flags=flags); write_json(A$admin_session,admin_session_path(p$dir))
+      try(admin_append_log(p$dir,message,failed,changed,snapshot_id,provider,NULL,NULL),silent=TRUE)
+      try(admin_finish_snapshot(A$app_dir,p$dir,snapshot_id),silent=TRUE)
       A$admin_turn<-NULL; A$admin_active<-FALSE; job_finish(A,jid,e)
       err_resp(failed,502L)
     })))
   }
   if (path == "/api/state" && identical(method, "GET")) return(json_resp(state_payload(A)))
+  if (path == "/api/progress" && identical(method, "GET")) {
+    q <- parse_query(req$QUERY_STRING %||% "")
+    ds <- tryCatch(safe_ds(q$dataset), error = function(e) e)
+    if (inherits(ds, "error")) return(err_resp(conditionMessage(ds), 400L))
+    id <- tryCatch(canonical_node_id(ds, q$node), error = function(e) e)
+    if (inherits(id, "error")) return(err_resp(conditionMessage(id), 400L))
+    side <- as.character(q$side %||% "")[1]
+    if (!side %in% c("primary", "validation")) return(err_resp("side must be primary or validation."))
+    return(json_resp(list(progress = progress_read(p, ds, id, side))))
+  }
   if (path == "/api/fullrun/run" && POST) {
     b <- read_body(req)
     ds <- tryCatch(safe_ds(b$dataset), error = function(e) e)
@@ -1628,15 +1745,7 @@ handle_api <- function(A, req, path, method, q) {
     return(json_resp(super_agent_cap(super_agent_run_action(A,p,tab,tool,act_args))))
   }
   if (path == "/api/layer-keys" && POST) {
-    b <- read_body(req)
-    ds <- tryCatch(safe_ds(b$dataset), error=function(e)e)
-    if(inherits(ds,"error"))return(err_resp(conditionMessage(ds),400L))
-    if(is.null(b$keys))return(err_resp("keys is required.",400L))
-    dry <- tryCatch(dag_parse_bool(b$dry_run %||% FALSE),error=function(e)e)
-    if(inherits(dry,"error"))return(err_resp(conditionMessage(dry),400L))
-    result <- tryCatch(layer_keys_set(p,ds,b$paramcd %||% if(isTRUE(load_graph(p,ds)$layered))"" else "*",b$keys,dry),error=function(e)e)
-    if(inherits(result,"error"))return(err_resp(conditionMessage(result),400L))
-    return(json_resp(result))
+    return(err_resp("Keys are dataset-wide and come from variable.csv Key. Edit the spec Key column.",400L))
   }
   if (path == "/api/dag/apply" && POST) {
     if (!fn_exists("apply_dag_changes")) return(need_fn("apply_dag_changes"))
@@ -1783,6 +1892,11 @@ handle_api <- function(A, req, path, method, q) {
     sides <- if (identical(side, "both")) c("primary", "validation") else side
     missing <- sides[!vapply(sides, function(s) !is.null(read_stored_code(file.path(side_run_dir(p$dir, ds, id, s), "code.R"))), TRUE)]
     if (length(missing)) return(err_resp(paste0("No stored code for ", paste(missing, collapse = " and "), "."), 409L))
+    run_node <- if (!is.null(graph)) graph_node(graph, id) else default_node(id)
+    for (s in sides) {
+      refs <- tryCatch({ lin <- lineage_context(spec, graph, run_node, p$dir, s, job_catalog(p$dir)); as.list(unique(c(lin$prompt_source_refs %||% lin$source_refs %||% character(), setdiff(lin$prompt_ids %||% lin$ids %||% character(), lin$target_id %||% character())))) }, error = function(e) list())
+      progress_set_step(p$dir, ds, id, s, "running", refs)
+    }
     if (exists("coder_session_ensure", mode = "function")) for (s in sides) {
       coder_session_ensure(p$dir, ds, id, s, load_config()$model %||% NULL)
       if (exists("coder_window_event", mode = "function")) coder_window_event(p$dir, ds, id, s, "Program run started")
@@ -1794,6 +1908,7 @@ handle_api <- function(A, req, path, method, q) {
     )
     if (inherits(ran, "error")) {
       for (s in sides) {
+        progress_finish(p$dir, ds, id, s, conditionMessage(ran))
         if (exists("coder_session_set_status",mode="function")) coder_session_set_status(p$dir,ds,id,s,"failed")
         if (exists("coder_window_event", mode = "function")) {
           coder_window_event(p$dir, ds, id, s, "Program run finished")
@@ -1807,6 +1922,7 @@ handle_api <- function(A, req, path, method, q) {
     if (!isTRUE(ran$ok)) {
       message <- ran$error %||% "No stored code for that side."
       for (s in sides) {
+        progress_finish(p$dir, ds, id, s, message)
         if (exists("coder_session_set_status",mode="function")) coder_session_set_status(p$dir,ds,id,s,"failed")
         if (exists("coder_window_event", mode = "function")) {
           coder_window_event(p$dir, ds, id, s, "Program run finished")
@@ -1819,6 +1935,7 @@ handle_api <- function(A, req, path, method, q) {
     }
     for (s in sides) {
       result <- ran$results[[s]] %||% list(ok = FALSE, error = "No run result.")
+      progress_finish(p$dir, ds, id, s, if (isTRUE(result$ok)) NULL else result$error %||% "Program failed.")
       if (exists("coder_session_set_status",mode="function"))
         coder_session_set_status(p$dir,ds,id,s,if(isTRUE(result$ok)) "success" else "failed")
       if (exists("coder_window_event", mode = "function")) {
@@ -1854,7 +1971,8 @@ handle_api <- function(A, req, path, method, q) {
     b <- read_body(req)
     ds <- tryCatch(safe_ds(b$dataset), error = function(e) e)
     if (inherits(ds, "error")) return(err_resp(conditionMessage(ds), 400L))
-    raw_ids <- batch_id_text(b$nodes)
+    whole_dataset <- isTRUE(b$whole_dataset)
+    raw_ids <- if (whole_dataset) dataset_node_ids(p, tryCatch(read_project_spec(p), error = function(e) NULL), ds) else batch_id_text(b$nodes)
     if (!length(raw_ids)) return(err_resp("nodes is required.", 400L))
     if (is.null(load_graph(p, ds))) return(err_resp("No dependency graph yet.", 404L))
     ids <- character()
@@ -1865,6 +1983,11 @@ handle_api <- function(A, req, path, method, q) {
     }
     ids <- unique(ids)
     graph <- load_graph(p,ds)
+    spec <- tryCatch(read_project_spec(p), error = function(e) NULL)
+    if (whole_dataset && isTRUE(graph$layered) && !is.null(spec)) {
+      missing <- batch_missing_variable_dags(graph, spec, ds)
+      if (length(missing)) return(err_resp(paste0("Generate Variable DAGs first for: ", paste(missing, collapse = ", ")), 409L))
+    }
     if (isTRUE(graph$layered)) {
       missing <- unique(vapply(Filter(function(id) { n<-graph_node(graph,id); !is.null(n$paramcd) && !toupper(n$paramcd) %in% toupper(flat_chr(graph$generated_parameters)) }, ids), function(id) graph_node(graph,id)$paramcd, ""))
       if (length(missing)) return(err_resp(paste0("Generate Variable DAGs first for: ",paste(missing,collapse=", ")),409L))
@@ -1874,11 +1997,14 @@ handle_api <- function(A, req, path, method, q) {
     if (length(bad)) return(err_resp(paste0("Unknown node: ", paste(bad, collapse = ", ")), 400L))
     compare <- if (is.null(b$compare)) TRUE else isTRUE(b$compare)
     ordered <- if (isTRUE(b$keep_order)) ids else batch_order_for(p, ds, ids)
-    return(json_resp(start_batch(A, ds, ordered, compare)))
+    return(json_resp(start_batch(A, ds, ordered, if (whole_dataset) TRUE else compare, whole_dataset = whole_dataset)))
   }
   if (path == "/api/batch/cancel" && POST) {
     if (!batch_running(A)) return(err_resp("No batch is running.", 409L))
     A$batch$cancelled <- TRUE
+    if (identical(A$batch$step, "fullrun") && is.environment(A$batch$fullrun_procs)) {
+      for (id in ls(A$batch$fullrun_procs)) try(A$batch$fullrun_procs[[id]]$kill_tree(), silent = TRUE)
+    }
     return(json_resp(batch_public(A$batch, A$project$dir)))
   }
   if (path == "/api/node/investigate" && POST) {
@@ -2166,6 +2292,26 @@ handle_api <- function(A, req, path, method, q) {
   err_resp("Not found.", 404L)
 }
 
+batch_missing_variable_dags <- function(graph, spec, ds) {
+  params <- spec_params(spec, ds)
+  all_params <- unique(toupper(trimws(as.character(params$PARAMCD %||% character()))))
+  all_params <- all_params[nzchar(all_params)]
+  generated <- toupper(flat_chr(graph$generated_parameters))
+  layers <- c(as_records(graph$layers %||% list()), as_records(graph$groups %||% list()))
+  classes <- as_records(graph$extraction$parameter_classification$parameters %||% list())
+  # A grouped executable layer (notably CARRY_OVER) represents all of its
+  # members. Compare against that layer identity instead of raw PARAMCDs.
+  missing <- character()
+  for (pc in all_params) {
+    hit <- Filter(function(layer) pc %in% toupper(flat_chr(layer$members_parameters)), layers)
+    classified_carry <- any(vapply(Filter(function(x) identical(toupper(x$paramcd %||% ""), pc), classes),
+      function(x) identical(tolower(as.character(x$classification %||% "")), "carry_over"), TRUE))
+    identity <- if (length(hit)) toupper(as.character(hit[[1]]$paramcd %||% pc)[1]) else if (classified_carry) "CARRY_OVER" else pc
+    if (!identity %in% generated && !pc %in% generated) missing <- c(missing, pc)
+  }
+  unique(missing)
+}
+
 side_notes_path <- function(p, ds, id, side) {
   file.path(node_run_dir(p, ds, id), side, "notes.json")
 }
@@ -2294,7 +2440,8 @@ batch_public <- function(b, project = NULL) {
     step = if (is.null(step) || !nzchar(as.character(step)[1])) NULL else as.character(step)[1],
     cancelled = isTRUE(b$cancelled),
     finished = isTRUE(b$finished),
-    results = b$results %||% list()
+    results = b$results %||% list(), whole_dataset = isTRUE(b$whole_dataset), fullrun = b$fullrun %||% NULL,
+    stopped_at = b$stopped_at %||% NULL
   )
 }
 
@@ -2359,6 +2506,10 @@ batch_record <- function(A, id, level, ok, message, compared = FALSE, compare_ok
   b$current <- NULL
   b$step <- NULL
   b$busy_step <- FALSE
+  if (isTRUE(b$stop_on_error) && !isTRUE(ok)) {
+    b$finished <- TRUE
+    b$stopped_at <- list(node = as.character(id)[1], reason = as.character(message %||% "Failed.")[1])
+  }
   A$batch <- b
   invisible()
 }
@@ -2397,11 +2548,15 @@ batch_continue <- function(A) {
   b <- A$batch
   if (!is.list(b) || isTRUE(b$finished)) return(invisible())
   if (isTRUE(b$cancelled) || b$index > length(b$order)) {
-    b$finished <- TRUE
     b$current <- NULL
     b$step <- NULL
     b$busy_step <- FALSE
+    if (isTRUE(b$whole_dataset) && !isTRUE(b$cancelled) && is.null(b$stopped_at)) {
+      b$step <- "fullrun"
+      b$current <- "primary + validation"
+    } else b$finished <- TRUE
     A$batch <- b
+    if (isTRUE(b$whole_dataset) && !isTRUE(b$cancelled) && is.null(b$stopped_at)) batch_start_fullruns(A)
     return(invisible())
   }
   b$step_token <- (b$step_token %||% 0L) + 1L
@@ -2581,10 +2736,45 @@ batch_advance <- function(A) {
   invisible()
 }
 
-start_batch <- function(A, ds, ids, compare) {
+batch_start_fullruns <- function(A) {
+  b <- A$batch
+  if (!is.list(b) || !isTRUE(b$whole_dataset) || !is.null(b$fullrun)) return(invisible())
+  run_id <- b$run_id
+  b$fullrun <- list(status = "running")
+  b$fullrun_procs <- new.env(parent = emptyenv())
+  A$batch <- b
+  run_side <- function(side) {
+    jid <- job_start(A, "fullrun", b$dataset, side)
+    pr <- launch(A, "fullrun_worker", list(project = A$project$dir, dataset = b$dataset, side = side, timeout = run_limit(A)), run_limit(A) + 30, tracker = b$fullrun_procs)
+    promises::then(pr,
+      onFulfilled = function(res) { job_finish(A, jid); res },
+      onRejected = function(e) {
+        if (isTRUE(A$batch$cancelled)) {
+          job_finish(A, jid)
+          return(list(ok = FALSE, error = "Cancelled."))
+        }
+        job_finish(A, jid, e); list(ok = FALSE, error = conditionMessage(e))
+      })
+  }
+  p1 <- run_side("primary"); p2 <- run_side("validation")
+  promises::promise_all(.list = list(p1, p2))$then(function(res) {
+    b2 <- A$batch
+    if (!is.list(b2) || !identical(b2$run_id, run_id)) return(invisible())
+    b2$fullrun <- list(status = if (isTRUE(b2$cancelled)) "cancelled" else if (all(vapply(res, function(x) isTRUE(x$ok), TRUE))) "complete" else "failed", primary = res[[1]], validation = res[[2]])
+    b2$finished <- TRUE
+    b2$current <- NULL
+    b2$step <- NULL
+    b2$busy_step <- FALSE
+    A$batch <- b2
+  })
+  invisible()
+}
+
+start_batch <- function(A, ds, ids, compare, whole_dataset = FALSE) {
   graph <- tryCatch(load_graph(A$project,ds),error=function(e)NULL)
   A$batch <- list(
     dataset = ds,
+    run_id = as.integer((A$batch_seq %||% 0L) + 1L),
     total = length(ids),
     done = 0L,
     current = NULL,
@@ -2593,6 +2783,7 @@ start_batch <- function(A, ds, ids, compare) {
     finished = FALSE,
     results = list(),
     compare = isTRUE(compare),
+    whole_dataset = isTRUE(whole_dataset), stop_on_error = isTRUE(whole_dataset), fullrun = NULL, stopped_at = NULL,
     order = ids,
     layered = isTRUE(graph$layered),
     blocked_layers = list(),
@@ -2601,6 +2792,7 @@ start_batch <- function(A, ds, ids, compare) {
     busy_step = FALSE,
     step_token = 0L
   )
+  A$batch_seq <- A$batch$run_id
   later::later(function() {
     tryCatch(batch_advance(A), error = function(e) batch_abort(A, e))
   }, 0)
